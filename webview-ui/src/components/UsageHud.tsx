@@ -41,7 +41,7 @@ export function UsageHud({ usage }: UsageHudProps) {
     >
       <div className="flex items-center gap-8 whitespace-nowrap">
         <span className="text-xs text-text-muted">Today</span>
-        <span className="text-sm">{formatTokens(totalTokens)} tok</span>
+        <span className="text-lg">{formatTokens(totalTokens)} tok</span>
         <span className="text-sm text-accent">{formatCost(usage.costUsd)}</span>
       </div>
       {expanded && (
