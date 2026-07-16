@@ -20,16 +20,13 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
-import type * as vscode from 'vscode';
 
 const debug = process.env.PIXEL_AGENTS_DEBUG !== '0';
 
 import type { HookProvider } from '../../core/src/provider.js';
 import type { TeamProvider } from '../../core/src/teamProvider.js';
-import type { ITerminalAdapter } from '../../core/src/terminalAdapter.js';
 import type { AgentStateStore } from './agentStateStore.js';
 import {
-  CLEAR_IDLE_THRESHOLD_MS,
   EXTERNAL_ACTIVE_THRESHOLD_MS,
   EXTERNAL_SCAN_INTERVAL_MS,
   EXTERNAL_STALE_CHECK_INTERVAL_MS,
@@ -48,46 +45,23 @@ import type { AgentState } from './types.js';
  *  seededMtimes, and pendingClearFiles Maps/Sets. */
 let dismissalTracker: DismissalTracker | null = null;
 
-/** Register the DismissalTracker instance. Called from PixelAgentsViewProvider at startup. */
+/** Register the DismissalTracker instance. Called at startup. */
 export function setDismissalTracker(tracker: DismissalTracker): void {
   dismissalTracker = tracker;
 }
 
-/** Get the active DismissalTracker (for PixelAgentsViewProvider direct access). */
+/** Get the active DismissalTracker. */
 export function getDismissalTracker(): DismissalTracker | null {
   return dismissalTracker;
 }
 
-/** Terminal adapter for matching terminals to agents. Set once at startup. */
-let terminalAdapter: ITerminalAdapter | null = null;
-
-/** Register the terminal adapter (VS Code terminals, standalone = null). */
-export function setTerminalAdapter(adapter: ITerminalAdapter): void {
-  terminalAdapter = adapter;
-}
-
-/** Agent removal callback. Injected by PixelAgentsViewProvider to avoid a
- *  server/src/ → src/ back-import on agentManager.ts. The ViewProvider closure
- *  captures the store and timer Maps, so only the agent ID is needed. */
+/** Agent removal callback. Injected at startup. */
 let agentRemovalCallback: ((id: number) => void) | null = null;
 
-/** Register the agent removal callback. Called by PixelAgentsViewProvider. */
+/** Register the agent removal callback. */
 export function setAgentRemovalCallback(cb: typeof agentRemovalCallback): void {
   agentRemovalCallback = cb;
 }
-
-/** Dependencies for per-agent /clear detection in readNewLines polling.
- *  Set once by ensureProjectScan; used by startFileWatching's poll loop. */
-let clearDetectionDeps: {
-  projectDir: string;
-  knownJsonlFiles: Set<string>;
-  activeAgentIdRef: { current: number | null };
-  fileWatchers: Map<number, fs.FSWatcher>;
-  pollingTimers: Map<number, ReturnType<typeof setInterval>>;
-  waitingTimers: Map<number, ReturnType<typeof setTimeout>>;
-  permissionTimers: Map<number, ReturnType<typeof setTimeout>>;
-  persistAgents: () => void;
-} | null = null;
 
 export function startFileWatching(
   agentId: number,
@@ -108,78 +82,7 @@ export function startFileWatching(
       clearInterval(interval);
       return;
     }
-    const agent = agents.get(agentId)!;
-    const prevOffset = agent.fileOffset;
     readNewLines(agentId, agents, waitingTimers, permissionTimers);
-
-    // HEURISTIC FALLBACK: Per-agent /clear detection (skipped when hooks handle sessions).
-    // When hooks are active, SessionEnd+SessionStart handle /clear reliably.
-    if (
-      !agent.hookDelivered &&
-      clearDetectionDeps &&
-      agent.fileOffset === prevOffset &&
-      agent.terminalRef &&
-      !agent.isExternal &&
-      ![...agents.values()].some((a) => a.isExternal) &&
-      agent.linesProcessed > 0 &&
-      clearDetectionDeps.activeAgentIdRef.current === agentId &&
-      Date.now() - agent.lastDataAt > CLEAR_IDLE_THRESHOLD_MS
-    ) {
-      const deps = clearDetectionDeps;
-      try {
-        const dirFiles = fs
-          .readdirSync(deps.projectDir)
-          .filter((f) => f.endsWith('.jsonl'))
-          .map((f) => path.join(deps.projectDir, f));
-        // Find the first untracked, non-dismissed file NOT already in knownJsonlFiles.
-        // knownJsonlFiles blocks seeded files (startup) and adopted files.
-        // dismissedJsonlFiles blocks old files from previous /clears.
-        // The main scanner does NOT add non-adopted files to knownJsonlFiles,
-        // so /clear files remain findable here.
-        for (const file of dirFiles) {
-          if (deps.knownJsonlFiles.has(file)) continue;
-          if (dismissalTracker!.isDismissed(file)) continue;
-          let tracked = false;
-          for (const a of agents.values()) {
-            if (a.jsonlFile === file) {
-              tracked = true;
-              break;
-            }
-          }
-          if (tracked) continue;
-          // Content-based /clear detection: only claim files with the /clear command
-          // record. Dropped "last-prompt" check because it also appears in --resume
-          // sessions. "/clear</command-name>" is specific to /clear (~1.5KB in file).
-          try {
-            const buf = Buffer.alloc(8192);
-            const fd = fs.openSync(file, 'r');
-            const bytesRead = fs.readSync(fd, buf, 0, 8192, 0);
-            fs.closeSync(fd);
-            if (!buf.toString('utf-8', 0, bytesRead).includes('/clear</command-name>')) continue;
-          } catch {
-            continue;
-          }
-          // Found a /clear file (has last-prompt) → claim it
-          deps.knownJsonlFiles.add(file);
-          console.log(
-            `[Pixel Agents] Watcher: Agent ${agentId} - /clear detected, reassigning to ${path.basename(file)}`,
-          );
-          reassignAgentToFile(
-            agentId,
-            file,
-            agents,
-            deps.fileWatchers,
-            deps.pollingTimers,
-            deps.waitingTimers,
-            deps.permissionTimers,
-            deps.persistAgents,
-          );
-          break; // Only claim one file per poll
-        }
-      } catch {
-        /* ignore dir read errors */
-      }
-    }
   }, FILE_WATCHER_POLL_INTERVAL_MS);
   pollingTimers.set(agentId, interval);
 }
@@ -258,7 +161,7 @@ export function ensureProjectScan(
   projectDir: string,
   knownJsonlFiles: Set<string>,
   projectScanTimerRef: { current: ReturnType<typeof setInterval> | null },
-  activeAgentIdRef: { current: number | null },
+  _activeAgentIdRef: { current: number | null },
   nextAgentIdRef: { current: number },
   agents: AgentStateStore,
   fileWatchers: Map<number, fs.FSWatcher>,
@@ -268,22 +171,8 @@ export function ensureProjectScan(
 
   persistAgents: () => void,
   _onAgentCreated?: (agent: AgentState) => void,
-  hooksEnabledRef?: { current: boolean },
+  _hooksEnabledRef?: { current: boolean },
 ): void {
-  // Set deps for per-agent /clear detection (only on first call)
-  if (!clearDetectionDeps) {
-    clearDetectionDeps = {
-      projectDir,
-      knownJsonlFiles,
-      activeAgentIdRef,
-      fileWatchers,
-      pollingTimers,
-      waitingTimers,
-      permissionTimers,
-      persistAgents,
-    };
-  }
-
   // Always seed this directory's files (supports multi-root workspaces).
   try {
     const files = fs
@@ -331,210 +220,7 @@ export function ensureProjectScan(
       teammateRemovalCallback?.(id);
     }
 
-    // When hooks are active, SessionStart handles new file detection.
-    if (hooksEnabledRef?.current) return;
-
-    for (const dir of trackedProjectDirs) {
-      scanForNewJsonlFiles(
-        dir,
-        knownJsonlFiles,
-        activeAgentIdRef,
-        nextAgentIdRef,
-        agents,
-        fileWatchers,
-        pollingTimers,
-        waitingTimers,
-        permissionTimers,
-        persistAgents,
-      );
-    }
   }, PROJECT_SCAN_INTERVAL_MS);
-}
-
-export function scanForNewJsonlFiles(
-  projectDir: string,
-  knownJsonlFiles: Set<string>,
-  activeAgentIdRef: { current: number | null },
-  nextAgentIdRef: { current: number },
-  agents: AgentStateStore,
-  fileWatchers: Map<number, fs.FSWatcher>,
-  pollingTimers: Map<number, ReturnType<typeof setInterval>>,
-  waitingTimers: Map<number, ReturnType<typeof setTimeout>>,
-  permissionTimers: Map<number, ReturnType<typeof setTimeout>>,
-
-  persistAgents: () => void,
-  onAgentCreated?: (agent: AgentState) => void,
-): void {
-  let files: string[];
-  try {
-    files = fs
-      .readdirSync(projectDir)
-      .filter((f) => f.endsWith('.jsonl'))
-      .map((f) => path.join(projectDir, f));
-  } catch {
-    return;
-  }
-
-  for (const file of files) {
-    if (knownJsonlFiles.has(file)) continue;
-
-    // Main scanner does NOT do /clear detection. /clear is handled per-agent
-    // in startFileWatching's poll loop (500ms, requires CURRENT terminal focus).
-    // Only add to knownJsonlFiles when the file is CLAIMED (terminal adopted).
-    // Non-adopted files stay OUT of knownJsonlFiles so the per-agent /clear
-    // check can find them when the idle check passes (up to 5s later).
-
-    // Try to adopt the focused terminal (only if it's a Claude-named terminal).
-    // Cast to vscode.Terminal because the adapter returns the real object at runtime;
-    // the TerminalHandle type is the minimal interface for the adapter contract.
-    const activeTerminal = terminalAdapter?.activeTerminal() as vscode.Terminal | undefined;
-    if (
-      activeTerminal &&
-      hookProvider?.terminalNamePrefix &&
-      activeTerminal.name.startsWith(hookProvider.terminalNamePrefix)
-    ) {
-      let owned = false;
-      for (const agent of agents.values()) {
-        if (agent.terminalRef === activeTerminal) {
-          owned = true;
-          break;
-        }
-      }
-      if (!owned) {
-        knownJsonlFiles.add(file); // Claimed by terminal adoption
-        adoptTerminalForFile(
-          activeTerminal,
-          file,
-          projectDir,
-          nextAgentIdRef,
-          agents,
-          activeAgentIdRef,
-          fileWatchers,
-          pollingTimers,
-          waitingTimers,
-          permissionTimers,
-          persistAgents,
-        );
-      } else {
-        // Active terminal is owned -- scan for untracked Claude-named terminals.
-        // Only adopt terminals with TERMINAL_NAME_PREFIX to avoid grabbing
-        // pre-existing shells ("zsh", "bash") for /clear files.
-        for (const terminal of (terminalAdapter?.allTerminals() ?? []) as vscode.Terminal[]) {
-          if (
-            !hookProvider?.terminalNamePrefix ||
-            !terminal.name.startsWith(hookProvider.terminalNamePrefix)
-          )
-            continue;
-          let owned = false;
-          for (const agent of agents.values()) {
-            if (agent.terminalRef === terminal) {
-              owned = true;
-              break;
-            }
-          }
-          if (!owned) {
-            knownJsonlFiles.add(file); // Claimed by terminal adoption
-            adoptTerminalForFile(
-              terminal,
-              file,
-              projectDir,
-              nextAgentIdRef,
-              agents,
-              activeAgentIdRef,
-              fileWatchers,
-              pollingTimers,
-              waitingTimers,
-              permissionTimers,
-              persistAgents,
-              onAgentCreated,
-            );
-            break;
-          }
-        }
-      }
-    }
-  }
-
-  // Clean up orphaned agents whose terminals have been closed (skip external agents)
-  for (const [id, agent] of agents) {
-    if (agent.isExternal) continue;
-    if (agent.terminalRef && agent.terminalRef.exitStatus !== undefined) {
-      console.log(`[Pixel Agents] Watcher: Agent ${id} - terminal closed, cleaning up orphan`);
-      agentRemovalCallback?.(id);
-    }
-  }
-}
-
-function adoptTerminalForFile(
-  terminal: vscode.Terminal,
-  jsonlFile: string,
-  projectDir: string,
-  nextAgentIdRef: { current: number },
-  agents: AgentStateStore,
-  activeAgentIdRef: { current: number | null },
-  fileWatchers: Map<number, fs.FSWatcher>,
-  pollingTimers: Map<number, ReturnType<typeof setInterval>>,
-  waitingTimers: Map<number, ReturnType<typeof setTimeout>>,
-  permissionTimers: Map<number, ReturnType<typeof setTimeout>>,
-
-  persistAgents: () => void,
-  onAgentCreated?: (agent: AgentState) => void,
-): void {
-  const id = nextAgentIdRef.current++;
-  const sessionId = path.basename(jsonlFile, '.jsonl');
-  // Skip to end of file -- adopted terminals show live activity only, not replay history
-  let fileOffset = 0;
-  try {
-    const stat = fs.statSync(jsonlFile);
-    fileOffset = stat.size;
-  } catch {
-    /* start from beginning if stat fails */
-  }
-  const agent: AgentState = {
-    id,
-    sessionId,
-    terminalRef: terminal,
-    isExternal: false,
-    projectDir,
-    jsonlFile,
-    fileOffset,
-    lineBuffer: '',
-    activeToolIds: new Set(),
-    activeToolStatuses: new Map(),
-    activeToolNames: new Map(),
-    activeSubagentToolIds: new Map(),
-    activeSubagentToolNames: new Map(),
-    backgroundAgentToolIds: new Set(),
-    isWaiting: false,
-    permissionSent: false,
-    hadToolsInTurn: false,
-    lastDataAt: 0,
-    linesProcessed: 0,
-    seenUnknownRecordTypes: new Set(),
-    hookDelivered: false,
-    inputTokens: 0,
-    outputTokens: 0,
-  };
-
-  agents.set(id, agent);
-  activeAgentIdRef.current = id;
-  persistAgents();
-  onAgentCreated?.(agent);
-
-  console.log(
-    `[Pixel Agents] Watcher: Agent ${id} - adopted terminal "${terminal.name}" for ${path.basename(jsonlFile)}`,
-  );
-
-  startFileWatching(
-    id,
-    jsonlFile,
-    agents,
-    fileWatchers,
-    pollingTimers,
-    waitingTimers,
-    permissionTimers,
-  );
-  readNewLines(id, agents, waitingTimers, permissionTimers);
 }
 
 // ── Lead + Teammates support (provider-driven) ──
@@ -655,7 +341,6 @@ export function scanForTeammateFiles(
     const agent: AgentState = {
       id,
       sessionId,
-      terminalRef: undefined,
       isExternal: true,
       projectDir,
       jsonlFile: file,
@@ -859,7 +544,6 @@ export function adoptExternalSessionFromHook(
     const agent: AgentState = {
       id,
       sessionId,
-      terminalRef: undefined,
       isExternal: true,
       projectDir: cwd,
       jsonlFile: '',
@@ -940,7 +624,6 @@ function adoptExternalSession(
   const agent: AgentState = {
     id,
     sessionId: path.basename(jsonlFile, '.jsonl'),
-    terminalRef: undefined,
     isExternal: true,
     projectDir,
     jsonlFile,

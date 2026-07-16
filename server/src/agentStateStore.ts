@@ -155,7 +155,8 @@ export class AgentStateStore {
       persisted.push({
         id: agent.id,
         sessionId: agent.sessionId,
-        terminalName: agent.terminalRef?.name ?? '',
+        // Retained for persistence-schema stability; standalone has no terminal.
+        terminalName: '',
         isExternal: agent.isExternal || undefined,
         jsonlFile: agent.jsonlFile,
         projectDir: agent.projectDir,

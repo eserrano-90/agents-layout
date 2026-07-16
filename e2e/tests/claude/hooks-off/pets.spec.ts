@@ -1,17 +1,12 @@
-import fs from 'fs';
-import path from 'path';
+import fs from 'node:fs';
+import path from 'node:path';
 
-import type { Frame, Locator } from '@playwright/test';
+import type { Locator, Page } from '@playwright/test';
 
-import { expect, test } from '../../../fixtures/pixel-agents';
-import {
-  closeBottomPanel,
-  getPixelAgentsFrame,
-  openPixelAgentsPanel,
-} from '../../../helpers/webview';
+import { expect, test } from '../../../fixtures/standalone';
 
 /**
- * e2e coverage for the animated pet system.
+ * e2e coverage for the animated pet system (standalone browser harness).
  *
  * Pets render only on the canvas (no DOM nodes) and the heart bubble is pure
  * runtime state that is never persisted, so the live assertions read pet state
@@ -25,8 +20,11 @@ import {
  * carousel button → onPetToggle → handlePetToggle → applyEdit. Only the
  * canvas-only interactions (hit-test geometry of getPetAt) are bypassed.
  *
- * These tests have no hook dependency; they live under hooks-off purely
- * because that is the lighter fixture path (no hook-server wait).
+ * Pets are a UI/webview feature with no hook dependency, so this spec runs
+ * against the lighter standalone browser fixture: the UI *is* `page` (the SPA
+ * served by `npx pixel-agents`) and server → client traffic is asserted via the
+ * WebSocket recorder (`standalone.drainMessages()`). It lives under hooks-off
+ * only for directory grouping; it never installs or drives hooks.
  */
 
 interface PetSnapshot {
@@ -42,7 +40,6 @@ interface PetSnapshot {
 interface PetTestHooks {
   getPets?: () => PetSnapshot[];
   petClick?: (petId: string) => void;
-  messageLog?: Array<{ type: string }>;
 }
 
 type PetWindow = Window & { __pixelAgentsTestHooks?: PetTestHooks };
@@ -54,9 +51,9 @@ const PETS_CAROUSEL = '[data-testid="pets-carousel"]';
  * that overlay the top toolbar and would otherwise intercept the Layout click.
  * Mirrors the layout-editor smoke test in hooks-on/lifecycle.spec.ts.
  */
-async function dismissFirstRunTooltips(frame: Frame): Promise<void> {
+async function dismissFirstRunTooltips(page: Page): Promise<void> {
   for (const tooltipText of ['Instant Detection Active', 'Updated to v']) {
-    const tooltip = frame.locator('div', { hasText: tooltipText }).first();
+    const tooltip = page.locator('div', { hasText: tooltipText }).first();
     if (await tooltip.isVisible().catch(() => false)) {
       const closeBtn = tooltip.locator('button', { hasText: 'x' }).first();
       if (await closeBtn.isVisible().catch(() => false)) {
@@ -67,89 +64,103 @@ async function dismissFirstRunTooltips(frame: Frame): Promise<void> {
 }
 
 /** Enter edit mode and open the Pets tab; returns the carousel locator. */
-async function openPetsTab(frame: Frame): Promise<Locator> {
-  await dismissFirstRunTooltips(frame);
-  await frame.locator('button[title="Edit office layout"]').click();
-  await frame.locator('button[title="Place pets"]').click();
-  const carousel = frame.locator(PETS_CAROUSEL);
+async function openPetsTab(page: Page): Promise<Locator> {
+  await dismissFirstRunTooltips(page);
+  await page.locator('button[title="Edit office layout"]').click();
+  await page.locator('button[title="Place pets"]').click();
+  const carousel = page.locator(PETS_CAROUSEL);
   await expect(carousel).toBeVisible({ timeout: 15_000 });
   return carousel;
 }
 
 /** Point-in-time snapshot of every live pet, read from the test hook. */
-async function readPets(frame: Frame): Promise<PetSnapshot[]> {
-  return frame.evaluate(() => {
+async function readPets(page: Page): Promise<PetSnapshot[]> {
+  return page.evaluate(() => {
     const w = window as PetWindow;
     return w.__pixelAgentsTestHooks?.getPets?.() ?? [];
   });
 }
 
 /** Toggle a pet's heart bubble exactly as a canvas click would. */
-async function petClick(frame: Frame, petId: string): Promise<void> {
-  await frame.evaluate((id) => {
+async function petClick(page: Page, petId: string): Promise<void> {
+  await page.evaluate((id) => {
     (window as PetWindow).__pixelAgentsTestHooks?.petClick?.(id);
   }, petId);
 }
 
+/** Wait for the SPA shell to be interactive (Settings button rendered). */
+async function waitForApp(page: Page): Promise<void> {
+  await expect(page.getByRole('button', { name: 'Settings' })).toBeVisible({ timeout: 30_000 });
+}
+
 test.describe('Pets', () => {
   test('pet sprites load, broadcast, and expose manifest names in the editor @area:pets', async ({
-    pixelAgents,
+    page,
+    standalone,
   }) => {
-    const { frame } = pixelAgents;
-
-    // The petSpritesLoaded broadcast is sent once after webviewReady. Proven
-    // delivered via the message log (records every received message type).
-    await frame.waitForFunction(() => {
-      const w = window as PetWindow;
-      const log = w.__pixelAgentsTestHooks?.messageLog ?? [];
-      return log.some((m) => m.type === 'petSpritesLoaded');
-    });
+    // petSpritesLoaded is (re)broadcast on every webviewReady. The standalone
+    // fixture drains the initial handshake during setup, so reload to force a
+    // fresh handshake and capture the broadcast off the recorded WebSocket
+    // stream. (The VS Code version read window.__pixelAgentsTestHooks.messageLog,
+    // which the webview never populates; the recorder is the real message log.)
+    await standalone.drainMessages();
+    await page.reload();
+    await waitForApp(page);
+    await expect
+      .poll(
+        async () => {
+          const messages = await standalone.drainMessages();
+          return messages.some((message) => message.type === 'petSpritesLoaded');
+        },
+        { timeout: 15_000 },
+      )
+      .toBe(true);
 
     // The two bundled pets (claudio, gitcat) render as carousel thumbnails in
     // alphabetical order, each titled with its manifest `name`. Asserting the
     // count + both names covers "loaded" and "manifest names" together.
-    const carousel = await openPetsTab(frame);
+    const carousel = await openPetsTab(page);
     await expect(carousel.locator('button')).toHaveCount(2);
     await expect(carousel.locator('button[title="Claudio"]')).toBeVisible();
     await expect(carousel.locator('button[title="Gitcat"]')).toBeVisible();
   });
 
-  test('placing a pet toggles it on/off and persists across a panel reload @area:pets', async ({
-    pixelAgents,
+  test('placing a pet toggles it on/off and persists across a reload @area:pets', async ({
+    page,
+    standalone,
   }) => {
-    const { frame, window, tmpHome } = pixelAgents;
-
-    const carousel = await openPetsTab(frame);
+    const carousel = await openPetsTab(page);
     const claudio = carousel.locator('button[title="Claudio"]');
     const gitcat = carousel.locator('button[title="Gitcat"]');
 
     // Toggle ON: clicking the carousel button drives the real placement path.
     await claudio.click();
-    await frame.waitForFunction(() => {
+    await page.waitForFunction(() => {
       const pets = (window as PetWindow).__pixelAgentsTestHooks?.getPets?.() ?? [];
       return pets.length === 1 && pets[0]?.petType === 0;
     });
 
     // Toggle OFF: clicking the same (now-active) button removes it.
     await claudio.click();
-    await frame.waitForFunction(
+    await page.waitForFunction(
       () => ((window as PetWindow).__pixelAgentsTestHooks?.getPets?.() ?? []).length === 0,
     );
 
     // Place both pets, then persist via the EditActionBar Save button.
     await claudio.click();
     await gitcat.click();
-    await frame.waitForFunction(
+    await page.waitForFunction(
       () => ((window as PetWindow).__pixelAgentsTestHooks?.getPets?.() ?? []).length === 2,
     );
 
-    const saveBtn = frame.locator('button', { hasText: 'Save' });
+    const saveBtn = page.locator('button', { hasText: 'Save' });
     await expect(saveBtn).toBeVisible({ timeout: 5_000 });
     await saveBtn.click();
 
     // The save round-trips through layoutPersistence to ~/.pixel-agents/layout.json
-    // (under the fixture's isolated HOME). Pets are opaque pass-through server-side.
-    const layoutPath = path.join(tmpHome, '.pixel-agents', 'layout.json');
+    // (under the standalone fixture's isolated HOME). Pets are opaque pass-through
+    // server-side.
+    const layoutPath = path.join(standalone.tmpHome, '.pixel-agents', 'layout.json');
     await expect
       .poll(
         () => {
@@ -167,12 +178,13 @@ test.describe('Pets', () => {
       )
       .toBe(2);
 
-    // Reload the panel (webview is disposed + re-resolved since there is no
-    // retainContextWhenHidden) and confirm the pets rehydrate from disk.
-    await closeBottomPanel(window);
-    await openPixelAgentsPanel(window);
-    const freshFrame = await getPixelAgentsFrame(window);
-    await freshFrame.waitForFunction(
+    // Reload the SPA. The WebSocket reconnects, the server re-sends layoutLoaded
+    // from ~/.pixel-agents/layout.json, and the pets rehydrate from disk. (The VS
+    // Code version toggled the bottom panel to force a fresh resolveWebviewView;
+    // a full page reload is the standalone equivalent.)
+    await page.reload();
+    await waitForApp(page);
+    await page.waitForFunction(
       () => ((window as PetWindow).__pixelAgentsTestHooks?.getPets?.() ?? []).length === 2,
       undefined,
       { timeout: 15_000 },
@@ -180,23 +192,21 @@ test.describe('Pets', () => {
   });
 
   test('clicking a pet shows a heart bubble that auto-dismisses and dismisses on re-click @area:pets', async ({
-    pixelAgents,
+    page,
   }) => {
-    const { frame } = pixelAgents;
-
     // Place one pet through the editor, then read its id back (spawn tile is
     // random, so the id is the only stable handle).
-    const carousel = await openPetsTab(frame);
+    const carousel = await openPetsTab(page);
     await carousel.locator('button[title="Claudio"]').click();
-    await frame.waitForFunction(
+    await page.waitForFunction(
       () => ((window as PetWindow).__pixelAgentsTestHooks?.getPets?.() ?? []).length === 1,
     );
-    const pets = await readPets(frame);
+    const pets = await readPets(page);
     const petId = pets[0]!.id;
 
     // Click → heart bubble appears.
-    await petClick(frame, petId);
-    await frame.waitForFunction((id) => {
+    await petClick(page, petId);
+    await page.waitForFunction((id) => {
       const p = ((window as PetWindow).__pixelAgentsTestHooks?.getPets?.() ?? []).find(
         (x) => x.id === id,
       );
@@ -205,7 +215,7 @@ test.describe('Pets', () => {
 
     // It auto-dismisses after WAITING_BUBBLE_DURATION_SEC (2s); the rAF loop
     // nulls bubbleType once the timer elapses. Timeout sits above 2s.
-    await frame.waitForFunction(
+    await page.waitForFunction(
       (id) => {
         const p = ((window as PetWindow).__pixelAgentsTestHooks?.getPets?.() ?? []).find(
           (x) => x.id === id,
@@ -219,16 +229,16 @@ test.describe('Pets', () => {
     // Show it again, then click while showing → fast-fade dismiss (0.3s). The
     // tight 1500ms window excludes the 2s auto-dismiss path, proving the click
     // collapsed the timer rather than the bubble timing out on its own.
-    await petClick(frame, petId);
-    await frame.waitForFunction((id) => {
+    await petClick(page, petId);
+    await page.waitForFunction((id) => {
       const p = ((window as PetWindow).__pixelAgentsTestHooks?.getPets?.() ?? []).find(
         (x) => x.id === id,
       );
       return p?.bubbleType === 'heart';
     }, petId);
 
-    await petClick(frame, petId);
-    await frame.waitForFunction(
+    await petClick(page, petId);
+    await page.waitForFunction(
       (id) => {
         const p = ((window as PetWindow).__pixelAgentsTestHooks?.getPets?.() ?? []).find(
           (x) => x.id === id,

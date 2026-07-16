@@ -83,22 +83,20 @@ const esbuildProblemMatcherPlugin = {
 };
 
 async function main() {
+  // Standalone CLI is the only bundled entry point.
   const ctx = await esbuild.context({
-    entryPoints: ['adapters/vscode/extension.ts'],
+    entryPoints: ['server/src/cli.ts'],
     bundle: true,
     format: 'cjs',
     minify: production,
     sourcemap: !production,
     sourcesContent: false,
     platform: 'node',
-    outfile: 'dist/extension.js',
-    external: ['vscode'],
+    outfile: 'dist/cli.js',
+    external: ['fastify', '@fastify/websocket', '@fastify/static', '@fastify/cors'],
     define: versionDefine,
     logLevel: 'silent',
-    plugins: [
-      /* add to the end of plugins array */
-      esbuildProblemMatcherPlugin,
-    ],
+    plugins: [esbuildProblemMatcherPlugin],
   });
   if (watch) {
     await ctx.watch();
@@ -108,26 +106,6 @@ async function main() {
     // Copy assets and hooks after build
     copyAssets();
     buildHooks();
-    await buildCli();
-  }
-}
-
-/** Bundle the standalone CLI entry point. */
-async function buildCli() {
-  await esbuild.build({
-    entryPoints: ['server/src/cli.ts'],
-    bundle: true,
-    format: 'cjs',
-    minify: production,
-    sourcemap: !production,
-    platform: 'node',
-    outfile: 'dist/cli.js',
-    external: ['fastify', '@fastify/websocket', '@fastify/static', '@fastify/cors'],
-    define: versionDefine,
-    logLevel: 'silent',
-  });
-  if (!production) {
-    console.log('[build] CLI bundled: dist/cli.mjs');
   }
 }
 

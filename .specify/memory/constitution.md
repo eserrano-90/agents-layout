@@ -27,6 +27,38 @@ Templates requiring updates:
   ⚠ .specify/templates/commands/*.md         — directory empty; nothing to reconcile.
 
 Follow-up TODOs: none. RATIFICATION_DATE set to first adoption date (2026-07-13).
+
+---
+
+Version change: 1.0.0 → 2.0.0
+Rationale: MAJOR bump. Removed VS Code extension as a shipping surface (deleted
+           adapters/vscode/, purged vscode type leaks from server/, removed
+           extension build target and VS Code E2E harness). Stripped dual-distribution
+           governance, persistence-isolation clauses for separate surfaces, and
+           verify-before-clear migration requirement. Reworded error-handling clause
+           from "MUST NOT crash the extension" → "MUST NOT crash the server/CLI".
+           Reduced from two-surface to single-surface (standalone CLI only).
+
+Modified principles:
+  - I. Strict Layering: removed adapters/vscode/ dependency clause and "standalone
+       CLI MUST NOT import adapters/vscode" sentence; still bans transport calls
+       outside broadcast layer. Layering is now core → server, core → webview-ui.
+Removed sections:
+  - Additional Constraints → Dual distribution (struck entire paragraph)
+  - Additional Constraints → Persistence isolation (rewritten as single-namespace)
+  - CI order: removed .vsix packaging step (no longer applicable)
+Modified sections:
+  - Additional Constraints → Error handling: "extension" → "server/CLI"
+  - Development Workflow & Quality Gates: CI order drops extension packaging
+
+Templates requiring updates:
+  ✅ .specify/templates/plan-template.md — no principle-specific references changed.
+  ✅ .specify/templates/spec-template.md — unaffected.
+  ✅ .specify/templates/tasks-template.md — unaffected.
+  ✅ .specify/templates/checklist-template.md — unaffected.
+
+Follow-up TODOs: CLAUDE.md and README.md updated in the same feature to reflect
+single-surface governance. E2E inventory drift check retained.
 -->
 
 # Pixel Agents Constitution
@@ -40,16 +72,13 @@ Dependencies MUST flow in one direction only:
 - `core/` depends on nothing (zero runtime side effects).
 - `server/` depends only on `core/`.
 - `webview-ui/` depends only on `core/`.
-- `adapters/vscode/` depends on `core/` and `server/`.
 
-The standalone CLI MUST NOT import `adapters/vscode/`, and `adapters/vscode/` MUST NOT
-import CLI-only code. No module under `server/` calls a transport method directly —
-all outbound messages flow through the `AgentStateStore` broadcast layer.
+No module under `server/` calls a transport method directly — all outbound messages
+flow through the `AgentStateStore` broadcast layer.
 
-**Rationale**: The two shipping surfaces (VS Code extension and `npx pixel-agents` CLI)
-compose the same runtime. Unidirectional dependencies are what make one source tree yield
-two artifacts without leakage; a violation couples the surfaces and breaks either
-distribution.
+**Rationale**: The standalone CLI (`npx pixel-agents`) composes the same runtime as
+any future host. Unidirectional dependencies are what make one source tree yield one
+coherent artifact without leakage.
 
 ### II. Protocol Contract Is Law
 
@@ -114,24 +143,22 @@ automated gate instead of reviewer memory.
 - `.js` extensions on all relative imports in extension + server (Node16 resolution).
 - `noUnusedLocals` / `noUnusedParameters` strict everywhere.
 
-**Dual distribution**: Both the VS Code `.vsix` and the `pixel-agents` npm package MUST
-build from the same source tree. The `package.json:files` allowlist governs the npm
-tarball; `dist/extension.js` is intentionally excluded from npm because the extension
-ships via the `.vsix`.
+**Single distribution**: The `pixel-agents` npm package (`npx pixel-agents`) is the only
+shipping surface. The `package.json:files` allowlist governs the npm tarball.
 
 **Error handling & resilience**: Errors MUST be caught and logged with graceful
-degradation — a failure MUST NOT crash the extension. Malformed JSONL lines and missing
-assets are silently tolerated with fallbacks; operation continues.
+degradation — a failure MUST NOT crash the server or CLI. Malformed JSONL lines and
+missing assets are silently tolerated with fallbacks; operation continues.
 
-**Persistence isolation**: Per-adapter namespaced persistence under `~/.pixel-agents/`.
-VS Code and standalone surfaces MUST NOT clobber each other. Legacy VS Code state
-migration MUST use verify-before-clear semantics (write, read back, only then clear).
+**Persistence isolation**: Single-namespace persistence under `~/.pixel-agents/`.
+All state (layout, config, agents, server discovery) lives in one namespace.
+No cross-surface migration is required.
 
 ## Development Workflow & Quality Gates
 
 CI MUST pass in this order before merge: install, lint, `asyncapi:validate`,
 `asyncapi:generate` + drift check, `e2e:inventory` + drift check, `check-types`,
-`test:server`, `test:webview`, `e2e` (3-OS × 3-shard matrix), `package`.
+`test:server`, `test:webview`, `e2e` (standalone only), `package`.
 
 The two drift checks are central guarantees and MUST remain enforced:
 
@@ -158,4 +185,4 @@ doc (`.specify/templates/*`, `CLAUDE.md`, `README.md`) in the same change.
 above are the automated enforcement surface; reviewers cover the rest. `CLAUDE.md` remains
 the compressed runtime engineering reference and MUST stay consistent with this document.
 
-**Version**: 1.0.0 | **Ratified**: 2026-07-13 | **Last Amended**: 2026-07-13
+**Version**: 2.0.0 | **Ratified**: 2026-07-13 | **Last Amended**: 2026-07-16

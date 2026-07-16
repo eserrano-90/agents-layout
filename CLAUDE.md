@@ -1,10 +1,10 @@
 # Pixel Agents — Compressed Reference
 
-Pixel art office where AI agents (Claude Code terminals today, any tool tomorrow) become animated characters. Ships as a **VS Code extension** and an **`npx pixel-agents` standalone CLI** from the same source tree.
+Pixel art office where AI agents (Claude Code terminals today, any tool tomorrow) become animated characters. Ships as **`npx pixel-agents` standalone CLI**.
 
 ## Architecture
 
-Strict layering: `core/` depends on nothing; `server/` depends only on `core/`; `webview-ui/` depends only on `core/`; `adapters/vscode/` depends on `core/` and `server/`. The standalone CLI never imports `adapters/vscode/` and vice versa.
+Strict layering: `core/` depends on nothing; `server/` depends only on `core/`; `webview-ui/` depends only on `core/`.
 
 ```
 core/                                Protocol + interface definitions (zero runtime side effects)
@@ -16,7 +16,6 @@ core/                                Protocol + interface definitions (zero runt
     teamProvider.ts                  Optional TeamProvider (semantic queries for Lead + Teammates)
     transport.ts                     MessageTransport interface, TransportState
     adapter.ts                       StateAdapter, AssetCache, PersistedAgent, AgentSeat
-    terminalAdapter.ts               TerminalAdapter (editor-driven terminal management)
     normalizeProjectPath.ts
     constants.ts
 
@@ -51,20 +50,11 @@ server/                              Lifecycle runtime + Fastify HTTP/WS server
   __tests__/                         13 Vitest files
   manual-hook-events.http            Manual hook testing helper (REST-Client format)
 
-adapters/vscode/                     VS Code surface — composes core + server
-  extension.ts                       activate() / deactivate()
-  PixelAgentsViewProvider.ts         WebviewViewProvider, thin bridge to AgentRuntime
-  agentManager.ts                    Terminal lifecycle (claude --session-id <uuid>), restore, persist
-  vscodeTerminalAdapter.ts           TerminalAdapter implementation
-  migrateVsCodeState.ts              One-time legacy state migration (verify-before-clear)
-  constants.ts                       VS Code IDs, command names, key names
-
 webview-ui/                          React 19 + Canvas UI (depends only on core/)
   src/
     transport/
-      index.ts                       createTransport() — single runtime branching point
-      postMessageTransport.ts        VS Code mode (acquireVsCodeApi)
-      webSocketTransport.ts          Standalone mode (exponential backoff, send queue)
+      index.ts                       createTransport() — always WebSocketTransport
+      webSocketTransport.ts          WebSocket with exponential backoff, send queue
       types.ts                       Re-exports MessageTransport from core
     runtime.ts                       isBrowserRuntime detection
     browserMock.ts                   Standalone-browser asset fetch + message injection
@@ -108,22 +98,18 @@ webview-ui/                          React 19 + Canvas UI (depends only on core/
         OfficeCanvas.tsx             Canvas, resize, DPR, mouse hit-testing, drag-to-move
         ToolOverlay.tsx              Activity label above hovered/selected character
 
-e2e/                                 Playwright suite (real VS Code + mock-claude scenarios)
+e2e/                                 Playwright suite (standalone browser + mock-claude scenarios)
   playwright.config.ts
   global-setup.ts
   fixtures/
-    pixel-agents.ts                  VS Code fixture: launch Electron, wait for panel
     standalone.ts                    Standalone CLI fixture: spawn server + browser page
     mock-claude, mock-claude.cmd     Bash + cmd wrapper invoked instead of real claude
     mock-claude-runner.cjs           Scenario runner: appendJsonl, emitHook, holdOpen
   helpers/
-    launch.ts                        Electron app + isolated HOME/workspace
-    mock-claude.ts                   claudeScenario() builder
     office.ts                        Overlay locators + assertions
     webview.ts                       Settings/modal helpers
     hooks.ts                         Hook server lifecycle helpers
     standalone.ts                    Standalone server + WebSocket browser helpers
-    internal-agent.ts                spawnInternalAgentAndWait
     lifecycle.ts                     Reusable scenario fragments
     team.ts                          Team config seeding + teammate helpers
     allure-labels.ts                 @area:<tag> → Allure epic
@@ -150,12 +136,11 @@ webview-ui/                          npm workspace
 
 ## Distribution
 
-Two artifacts from one source tree:
+Single artifact from the source tree:
 
-- **VS Code extension** (`.vsix`) — `pablodelucca.pixel-agents` on VS Code Marketplace and Open VSX. Bundles VS Code adapter + webview SPA + assets + hook scripts.
 - **npm package** (`pixel-agents`) — `npx pixel-agents [--port 3100]` runs the Fastify server and serves the SPA on the same port. Bundles CLI + webview SPA + assets + hook scripts + `core/asyncapi.yaml` (so third-party clients can regenerate from it).
 
-`package.json:files` allowlist controls the npm tarball: `dist/cli.js{,.map}`, `dist/webview/`, `dist/assets/`, `dist/hooks/`, `core/asyncapi.yaml`, `icon.png`. `dist/extension.js` is intentionally excluded since the VS Code entry ships through the `.vsix`.
+`package.json:files` allowlist controls the npm tarball: `dist/cli.js{,.map}`, `dist/webview/`, `dist/assets/`, `dist/hooks/`, `core/asyncapi.yaml`, `icon.png`.
 
 ## Communication Flow
 
@@ -174,11 +159,9 @@ JSONL transcripts ─FileWatcher─→ TranscriptParser ┤
                                                    ↓
                                               StoreEvents → broadcast
                                                    ↓
-                          PostMessageTransport ──┤├── WebSocketTransport
-                                 (VS Code)      (standalone browser)
+                                           WebSocketTransport
+                                        (standalone browser)
 ```
-
-The VS Code adapter wires `PostMessageTransport` against `acquireVsCodeApi()`. The standalone CLI exposes the same protocol over WebSocket at `/ws` with the webview SPA served from the same Fastify instance. **The protocol shape is identical; only the wire differs.**
 
 Adding a new CLI integration is one subdirectory under `server/src/providers/hook/<id>/`: provider, optional `TeamProvider`, installer, hook scripts. Zero changes to the runtime, the UI, or any existing provider.
 
@@ -207,9 +190,9 @@ export interface MessageTransport {
 export type TransportState = 'connecting' | 'connected' | 'reconnecting' | 'disconnected';
 ```
 
-`PostMessageTransport` reports `connected` for its entire lifetime. `WebSocketTransport` reconnects with exponential backoff (250 ms, 500 ms, 1 s, 2 s, 4 s, capped) and queues sends while disconnected.
+`WebSocketTransport` reconnects with exponential backoff (250 ms, 500 ms, 1 s, 2 s, 4 s, capped) and queues sends while disconnected.
 
-`createTransport()` in `webview-ui/src/transport/index.ts` is the **only branching point** in the UI codebase. Everything downstream uses the `MessageTransport` interface and never knows which transport is active.
+`createTransport()` in `webview-ui/src/transport/index.ts` always creates a `WebSocketTransport`. Everything downstream uses the `MessageTransport` interface and never knows which transport is active.
 
 ## Provider Abstraction
 
@@ -239,7 +222,7 @@ Teammate dismissal is driven by team config polling (`getTeamMembers(teamName)` 
 
 ## Server Runtime
 
-`AgentRuntime` (`server/src/agentRuntime.ts`) is the shared lifecycle core. Both surfaces (`adapters/vscode/PixelAgentsViewProvider.ts` and `server/src/cli.ts`) compose the same runtime; only the `StateAdapter` namespace, `MessageTransport`, and `TerminalAdapter` differ.
+`AgentRuntime` (`server/src/agentRuntime.ts`) is the shared lifecycle core. Both surfaces (`server/src/cli.ts` and any future host) compose the same runtime; only the `StateAdapter` namespace and `MessageTransport` differ.
 
 ```typescript
 export class AgentRuntime {
@@ -249,7 +232,6 @@ export class AgentRuntime {
     layoutPersistence: LayoutPersistence;
     assetCache: AssetCache;
     config: Pick<AdapterSettings, 'hooksEnabled' | 'watchAllSessions'>;
-    terminalAdapter?: TerminalAdapter;
     callbacks: RuntimeLifecycleCallbacks;
   });
   registerAgent / unregisterAgent / removeAgent / removeTeammate / removeTeammates
@@ -294,17 +276,14 @@ Per-agent runtime data: provider reference, session key, transcript-fallback fie
 
 ```
 ~/.pixel-agents/
-  config.json              { vscode, standalone, externalAssetDirectories }
-  vscode-state.json        { agents, seats }
+  config.json              { standalone, externalAssetDirectories }
   standalone-state.json    { agents, seats }
-  layout.json              OfficeLayout (shared across surfaces)
+  layout.json              OfficeLayout
   server.json              { port, pid, authToken }
   hooks/claude-hook.js     Bundled hook script (CJS, shebang)
 ```
 
-`FileStateAdapter({ namespace })` backs both runtimes. Per-namespace settings: `soundEnabled`, `lastSeenVersion`, `alwaysShowLabels`, `watchAllSessions`, `hooksEnabled`, `hooksInfoShown`. Running both surfaces in parallel never clobbers either.
-
-`migrateVsCodeState` (VS Code adapter only) walks each known legacy key once with **verify-before-clear** semantics: write to file, read back, only then clear the legacy key. While anything remains unmigrated, activation shows a non-blocking warning.
+`FileStateAdapter({ namespace })` backs the runtime. Settings: `soundEnabled`, `lastSeenVersion`, `alwaysShowLabels`, `watchAllSessions`, `hooksEnabled`, `hooksInfoShown`.
 
 Layout writes are atomic via tmp + rename. Cross-window watching is hybrid (`fs.watch` + 2 s polling). `markOwnWrite()` prevents the watcher from re-reading our own write.
 
@@ -418,9 +397,8 @@ Three tiers, each with its own framework.
 | `agentStateStore.test.ts`      | Mutations, EventEmitter events, snapshot                            |
 | `hookEventHandler.test.ts`     | Routing, buffering, normalized dispatch, team gating                |
 | `sessionRouter.test.ts`        | session_id mapping, pending sessions, buffer flush                  |
-| `fileWatcherDismissal.test.ts` | DismissalTracker integration                                        |
 | `fileStateAdapter.test.ts`     | Namespaced persistence, allowlist, settings round-trip              |
-| `migrateVsCodeState.test.ts`   | Verify-before-clear, partial migration                              |
+| `fileWatcherDismissal.test.ts` | DismissalTracker integration                                        |
 | `teamUtils.test.ts`            | Inline-teammate helpers                                             |
 | `claudeTeamProvider.test.ts`   | Discovery, membership, metadata extraction                          |
 | `claude.test.ts`               | `normalizeHookEvent` per Claude event, file fallback                |
@@ -439,7 +417,7 @@ Run: `npm run test:webview`.
 
 ### End-to-end (Playwright)
 
-`e2e/` — Playwright tests against a real VS Code Electron instance + a standalone Fastify server. **47 tests across 6 spec files**, run on CI as a 3-OS x 3-shard matrix (Linux, macOS, Windows; each shard runs ~1/3 of the suite at `--workers=1`).
+`e2e/` — Playwright tests against the standalone Fastify server. **Tests across 6 spec files**, run on CI as a multi-OS matrix.
 
 | Area (`@area:<tag>`) | Specs                                                                     | What                                                                                                                                                               |
 | -------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -454,7 +432,7 @@ Run: `npm run test:webview`.
 
 **Authoring rules (normative)**: before writing a new spec, read `e2e/README.md` → "Mocking model & rules". It is the single source of truth for the process-boundary principle, the append-only transcript rule, the assert-on-visible-outcomes discipline, and the one standalone-server exception. New tests must follow that model.
 
-**Isolation**: each test gets its own `tmpHome`, workspace directory, VS Code `--user-data-dir`, and mock-log file. No state leaks between tests.
+**Isolation**: each test gets its own `tmpHome`, workspace directory, and mock-log file. No state leaks between tests.
 
 **Auto-fixtures**: `_allureLabels` (auto: true) reads `@area:<tag>` from `testInfo.tags` and applies the corresponding Allure epic.
 
@@ -488,11 +466,10 @@ npm test                   # webview + server vitest
 npm run e2e                # Playwright
 ```
 
-`esbuild.js` runs three bundles:
+`esbuild.js` runs two bundles:
 
-1. **Extension** (`dist/extension.js`) from `adapters/vscode/extension.ts`. External: `vscode`.
-2. **CLI** (`dist/cli.js`) from `server/src/cli.ts`. Externals pulled at install time (`fastify`, `@fastify/*`).
-3. **Hook scripts** (`dist/hooks/claude-hook.js`) from `server/src/providers/hook/claude/hooks/claude-hook.ts`. CJS, shebang.
+1. **CLI** (`dist/cli.js`) from `server/src/cli.ts`. Externals pulled at install time (`fastify`, `@fastify/*`).
+2. **Hook scripts** (`dist/hooks/claude-hook.js`) from `server/src/providers/hook/claude/hooks/claude-hook.ts`. CJS, shebang.
 
 `define: { 'process.env.PIXEL_AGENTS_VERSION': JSON.stringify(version) }` stamps the package version into all bundles.
 
@@ -505,7 +482,6 @@ cd webview-ui && npm run dev        # Vite dev server (separate terminal)
 
 The webview Vite dev server is **not** included in `npm run watch` — it has to be run separately.
 
-**F5 in VS Code** launches the Extension Development Host with the local extension loaded.
 
 ### CI
 
@@ -513,13 +489,15 @@ Single workflow runs (in order): install, lint, `asyncapi:validate`, `asyncapi:g
 
 The drift checks are the central guarantees: `core/asyncapi.yaml` ↔ `core/src/messages.ts` stay in lockstep; `e2e/README.md` stays in sync with the spec list.
 
+The drift checks are the central guarantees: `core/asyncapi.yaml` ↔ `core/src/messages.ts` stay in lockstep; `e2e/README.md` stays in sync with the spec list.
+
 ## TypeScript Constraints
 
 - **No `enum`** (`erasableSyntaxOnly` in webview) — use `as const` objects (`TileType`, `CharacterState`, `Direction`, `EditTool`).
-- **`import type`** required for type-only imports (`verbatimModuleSyntax` in webview; convention in extension).
+- **`import type`** required for type-only imports (`verbatimModuleSyntax` in webview; convention in server).
 - **`noUnusedLocals` / `noUnusedParameters`** — strict everywhere.
-- **`.js` extensions** on all relative imports in extension + server (Node16 module resolution).
-- **Module Node16, target ES2022** in the extension/server. **`erasableSyntaxOnly`, `verbatimModuleSyntax`, `noFallthroughCasesInSwitch`** in the webview.
+- **`.js` extensions** on all relative imports in server (Node16 module resolution).
+- **Module Node16, target ES2022** in the server. **`erasableSyntaxOnly`, `verbatimModuleSyntax`, `noFallthroughCasesInSwitch`** in the webview.
 
 ## Constants Policy
 
@@ -527,8 +505,7 @@ All magic numbers and strings are centralized — never inline:
 
 | Where                              | What lives there                                                                                                                        |
 | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `server/src/constants.ts`          | All timing/scanning constants (`PERMISSION_TIMER_DELAY_MS`, `TEXT_IDLE_DELAY_MS`, scanner intervals) shared by extension and standalone |
-| `adapters/vscode/constants.ts`     | VS Code-only IDs, command names, workspace state keys                                                                                   |
+| `server/src/constants.ts`          | All timing/scanning constants (`PERMISSION_TIMER_DELAY_MS`, `TEXT_IDLE_DELAY_MS`, scanner intervals) shared by server and standalone |
 | `core/src/constants.ts`            | Protocol-level constants (e.g., transport state names)                                                                                  |
 | `webview-ui/src/constants.ts`      | Webview magic numbers (grid, animation, rendering, camera, zoom, editor, game logic) + canvas overlay rgba strings                      |
 | `webview-ui/src/index.css` `:root` | CSS custom properties (`--pixel-bg`, `--pixel-border`, `--pixel-accent`, ...) for React inline styles and CSS                           |
@@ -545,7 +522,7 @@ All magic numbers and strings are centralized — never inline:
 
 Use `console.log`/`error`/`warn` with prefixed context:
 
-- Extension: `[Pixel Agents]`, `[Extension]`
+- Server/CLI: `[Pixel Agents]`
 - Asset loading: `[AssetLoader]`
 - Webview: `[Webview]`
 
@@ -568,7 +545,7 @@ Use `console.log`/`error`/`warn` with prefixed context:
 
 ## Manual Hook Testing
 
-`server/manual-hook-events.http` (REST-Client format) drives the local hook server while the extension is running. Copy `port` and `token` from `~/.pixel-agents/server.json`, set `cwd` to a workspace folder opened in the Extension Development Host. Covers `SessionStart` → `PreToolUse` → `PermissionRequest`/`Notification`/`Stop` → `SessionEnd`.
+`server/manual-hook-events.http` (REST-Client format) drives the local hook server. Copy `port` and `token` from `~/.pixel-agents/server.json`. Covers `SessionStart` → `PreToolUse` → `PermissionRequest`/`Notification`/`Stop` → `SessionEnd`.
 
 If `cwd` is outside the current workspace, enable **Watch All Sessions** first.
 
@@ -595,8 +572,7 @@ Supporting: `wall-tile-editor.html` (wall sprite editing), `jsonl-viewer.html` (
 - **Transport abstraction**: `MessageTransport` interface, `PostMessageTransport` + `WebSocketTransport`. One branching point in the entire UI.
 - **HookProvider** as the integration boundary, with optional file fallback. New CLIs are a single subdirectory under `server/src/providers/hook/<id>/`.
 - **TeamProvider** as optional extension. Claude Agent Teams is the only implementation.
-- **Per-adapter namespaced persistence** under `~/.pixel-agents/`. VS Code and standalone never clobber each other.
-- **Verify-before-clear migration** for legacy VS Code state.
+- **Per-adapter namespaced persistence** under `~/.pixel-agents/`. Single namespace for all state.
 - **Single `WebviewViewProvider`** (panel area, not editor area).
 - **Inline esbuild problem matcher** (no extra extension needed).
 - **`erasableSyntaxOnly`** in webview forbids `enum` — use `as const` objects.
@@ -605,7 +581,6 @@ Supporting: `wall-tile-editor.html` (wall sprite editing), `jsonl-viewer.html` (
 
 ## Project Identity
 
-- Extension ID: `pablodelucca.pixel-agents` (VS Code Marketplace + Open VSX)
 - npm package: `pixel-agents` (CLI bin: `pixel-agents`)
 - GitHub: `https://github.com/pixel-agents-hq/pixel-agents`
 - License: MIT

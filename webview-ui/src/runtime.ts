@@ -1,19 +1,13 @@
 /**
  * Runtime detection, provider-agnostic
  *
- * Single source of truth for determining whether the webview is running
- * inside an IDE extension (VS Code, Cursor, Windsurf, etc.) or standalone
- * in a browser.
+ * The webview ships only as the standalone browser SPA (served by the
+ * `pixel-agents` CLI over WebSocket), so the runtime is always the browser.
+ * Retained as a named constant because UI code gates browser-only behavior on
+ * it (e.g. hiding the "+ Agent" launcher when there is no terminal to drive).
  */
 
-declare function acquireVsCodeApi(): unknown;
-
-type Runtime = 'vscode' | 'browser';
-// Future: 'cursor' | 'windsurf' | 'electron' | etc.
-
-const runtime: Runtime = typeof acquireVsCodeApi !== 'undefined' ? 'vscode' : 'browser';
-
-export const isBrowserRuntime = runtime === 'browser';
+export const isBrowserRuntime = true;
 
 /**
  * True only under the Playwright e2e harness, which sets `__PIXEL_AGENTS_E2E`
