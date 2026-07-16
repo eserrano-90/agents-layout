@@ -17,7 +17,7 @@ vi.mock('vscode', () => ({
 import { AgentStateStore } from '../src/agentStateStore.js';
 import { DISMISSED_COOLDOWN_MS, EXTERNAL_ACTIVE_THRESHOLD_MS } from '../src/constants.js';
 import { DismissalTracker } from '../src/dismissalTracker.js';
-import { scanExternalDir, scanForNewJsonlFiles, setDismissalTracker } from '../src/fileWatcher.js';
+import { scanExternalDir, setDismissalTracker } from '../src/fileWatcher.js';
 
 /**
  * Tests for the DismissalTracker integration with fileWatcher's scanner functions.
@@ -231,48 +231,6 @@ describe('fileWatcher dismissal state', () => {
       runExternalScan();
 
       expect(agents.size).toBe(1);
-    });
-  });
-
-  // ── scanForNewJsonlFiles (project-scan helper) ─────────────────────
-
-  describe('scanForNewJsonlFiles: project scanner', () => {
-    function runProjectScan(): void {
-      scanForNewJsonlFiles(
-        projectDir,
-        knownJsonlFiles,
-        { current: null },
-        nextAgentIdRef,
-        agents,
-        fileWatchers,
-        pollingTimers,
-        waitingTimers,
-        permissionTimers,
-        () => {},
-      );
-    }
-
-    it('skips files already in knownJsonlFiles (seeded at startup)', () => {
-      const file = writeJsonlFile('sess-1.jsonl', '{"type":"assistant"}\n');
-      knownJsonlFiles.add(file);
-
-      runProjectScan();
-
-      // No adoption — the file is known, not new.
-      expect(agents.size).toBe(0);
-    });
-
-    it('skips files expired in dismissedJsonlFiles during project scan', () => {
-      // Project scan (used by the internal terminal adoption path) also
-      // honors dismissal cooldown. Seed the file as dismissed very recently.
-      const file = writeJsonlFile('sess-1.jsonl', '{"type":"assistant"}\n');
-      tracker.dismiss(file, Date.now() - 5_000);
-
-      runProjectScan();
-
-      // No active-terminal agent is present, so adoption shouldn't fire regardless.
-      // Primarily: dismissal entry should NOT get erased by this pass.
-      expect(tracker.isDismissed(file)).toBe(true);
     });
   });
 

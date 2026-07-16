@@ -1,6 +1,4 @@
-import path from 'path';
-
-import { expect, test } from '../../../fixtures/pixel-agents';
+import { expect, test } from '../../../fixtures/standalone';
 import {
   idlePrompt,
   permissionRequest,
@@ -9,15 +7,7 @@ import {
   sessionEndExit,
   sessionStartStartup,
   stop,
-  waitForHookServer,
 } from '../../../helpers/hooks';
-import { spawnInternalAgentAndWait } from '../../../helpers/internal-agent';
-import {
-  arrangeNextClaudeInvocation,
-  claudeScenario,
-  spawnExternalClaudeScenario,
-  waitForClaudeHookSetup,
-} from '../../../helpers/mock-claude';
 import {
   expectOverlayCount,
   expectOverlayVisible,
@@ -28,168 +18,176 @@ import {
   appendAssistantToolUse,
   appendJsonlRecord,
   buildUserToolResultRecord,
-  getClaudeProjectDir,
+  createClaudeTranscript,
 } from '../../../helpers/team';
-import { getPixelAgentsFrame, openPixelAgentsPanel, setSettings } from '../../../helpers/webview';
+import { setSettings } from '../../../helpers/webview';
+
+// DROPPED (VS Code-only, no standalone equivalent):
+// - "internal terminal spawns agent" — the "+ Agent" internal-terminal spawn
+//   path (spawnInternalAgentAndWait), the invocationLog `session-id=` assertion,
+//   the launched-jsonl basename assertion, and the "Claude Code #N" terminal-tab
+//   assertion all verify VS Code's terminal-launch mechanism, which does not
+//   exist in the standalone CLI (no terminals, no "+ Agent" button; every
+//   session is external and hook-driven). The portable half of that test — the
+//   JSONL-driven Task sub-character appear/despawn lifecycle — is ported below
+//   as "Task subagent appears then despawns", with the session brought up via a
+//   hand-created transcript + SessionStart hook instead of an internal spawn.
 
 test.describe('Hooks ON / spawn paths', () => {
-  test('internal terminal spawns agent and Task subagent appears then despawns @area:spawn', async ({
-    pixelAgents,
-  }) => {
-    const { frame, window, tmpHome, mockLogFile } = pixelAgents;
-
-    await setSettings(frame, {
-      watchAllSessions: false,
-      hooksEnabled: true,
-      alwaysShowLabels: true,
-      debugView: false,
-    });
-
-    await arrangeNextClaudeInvocation(
-      tmpHome,
-      claudeScenario('internal terminal basic spawn').build(),
-    );
-    const spawned = await spawnInternalAgentAndWait(frame, tmpHome, mockLogFile);
-
-    expect(spawned.invocationLog).toContain(`session-id=${spawned.sessionId}`);
-    expect(path.basename(spawned.jsonlFile)).toBe(`${spawned.sessionId}.jsonl`);
-
-    const terminalTab = window.getByText(/Claude Code #\d+/);
-    await expect(terminalTab.first()).toBeVisible({ timeout: 15_000 });
-
-    await openPixelAgentsPanel(window);
-    const panelFrame = await getPixelAgentsFrame(window);
-    await expectOverlayCount(panelFrame, 1);
-
-    // Sub-character appears on Task tool_use and despawns on tool_result.
-    // Task subagent lifecycle is JSONL-driven even in hooks-on mode
-    // (transcriptParser routes Task/Agent tool events through JSONL
-    // regardless of hookDelivered).
-    const taskToolId = 'toolu-subagent-spawn';
-    appendAssistantToolUse(spawned.jsonlFile, taskToolId, 'Task', {
-      description: 'spawned subtask',
-    });
-    await expectOverlayCount(panelFrame, 2);
-    await expectOverlayVisible(panelFrame, 'Subtask: spawned subtask');
-
-    appendJsonlRecord(spawned.jsonlFile, buildUserToolResultRecord(taskToolId));
-    await expectOverlayCount(panelFrame, 1);
-  });
-
-  // External hook-driven session adoption.
-  //
-  // Driven directly from the test via sendHookEvent (not from mock-claude's
-  // scheduler) for deterministic timing. The original timer-driven version
-  // passed in isolation but flaked reliably under full-suite load: the
-  // 200ms/2000ms/3200ms/4400ms/6000ms scheduled emissions slipped, and the
-  // test raced to see all 5 effects within fixed wall-clock windows. The
-  // teammate-routing tests use this same direct-emission pattern and don't
-  // flake.
-  test('external Claude session adopted via hook confirmation lifecycle @area:spawn', async ({
-    pixelAgents,
-  }) => {
-    const { frame, tmpHome, workspaceDir, mockLogFile } = pixelAgents;
-
-    await setSettings(frame, {
+  // JSONL-driven sub-character lifecycle. A Task tool_use in the transcript
+  // spawns a "Subtask:" sub-character; its matching tool_result despawns it.
+  // transcriptParser routes Task/Agent tool events through JSONL regardless of
+  // hookDelivered, so this is exercised with hooks ON. The lead session is
+  // stood up via a hand-created transcript + SessionStart hook (the documented
+  // standalone exception to the no-hand-written-transcript rule), then confirmed
+  // by a PreToolUse hook so its overlay renders.
+  test('Task subagent appears then despawns @area:spawn', async ({ page, standalone }) => {
+    await setSettings(page, {
       watchAllSessions: true,
       hooksEnabled: true,
       alwaysShowLabels: true,
       debugView: false,
     });
+    await standalone.drainMessages();
 
-    await waitForClaudeHookSetup(tmpHome);
-    const serverConfig = await waitForHookServer(tmpHome);
-    const sessionId = 'external-hook-session';
-
-    // Spawn mock-claude with only autoInit; the test drives every hook below.
-    // holdOpenFor(3_000) keeps the process alive briefly so the JSONL it created
-    // stays attached during the assertions, then exits before fixture teardown
-    // (the fixture's killTrackedExternalProcesses sweep is the fallback safety net).
-    await spawnExternalClaudeScenario({
-      tmpHome,
-      workspaceDir,
-      mockLogFile,
-      scenario: claudeScenario('external hook-driven session adoption').holdOpenFor(3_000).build(),
+    const sessionId = 'subagent-lifecycle-session';
+    const { transcriptPath } = createClaudeTranscript(
+      standalone.tmpHome,
+      standalone.workspaceDir,
       sessionId,
+    );
+
+    // SessionStart only stages a pending session (transient filter); a
+    // PreToolUse confirms it and the lead overlay appears.
+    await sendHookEvent(
+      standalone.hookServerConfig,
+      sessionStartStartup(sessionId, standalone.workspaceDir, transcriptPath),
+    );
+    await sendHookEvent(standalone.hookServerConfig, preToolUseBash(sessionId, 'npm test'));
+    await expectOverlayCount(page, 1);
+
+    // Sub-character appears on the Task tool_use and despawns on its tool_result.
+    const taskToolId = 'toolu-subagent-spawn';
+    appendAssistantToolUse(transcriptPath, taskToolId, 'Task', {
+      description: 'spawned subtask',
     });
+    await expectOverlayCount(page, 2);
+    await expectOverlayVisible(page, 'Subtask: spawned subtask');
 
-    const projectDir = getClaudeProjectDir(tmpHome, workspaceDir);
-    const transcriptPath = path.join(projectDir, `${sessionId}.jsonl`);
-
-    // 1. SessionStart fires. Session is pending (transient filter), no overlay yet.
-    await sendHookEvent(serverConfig, sessionStartStartup(sessionId, workspaceDir, transcriptPath));
-    await frame.waitForTimeout(500); // give SessionStart time to land before asserting absence
-    await expectOverlayCount(frame, 0);
-
-    // 2. PreToolUseBash confirms the session; agent appears with bash status.
-    await sendHookEvent(serverConfig, preToolUseBash(sessionId, 'npm test'));
-    await expectOverlayCount(frame, 1);
-    await expectOverlayVisible(frame, 'Running: npm test');
-
-    // 3. PermissionRequest → "Needs approval"
-    await sendHookEvent(serverConfig, permissionRequest(sessionId));
-    await expectOverlayVisible(frame, 'Needs approval');
-
-    // 4. Stop → finished turn shows ONLY the checkmark; the label falls back to
-    //    idle (no dedicated text), distinct from idle_prompt's "Waiting for input".
-    await sendHookEvent(serverConfig, stop(sessionId));
-    await expectOverlayVisible(frame, 'Idle');
-
-    // 5. Notification(idle_prompt) → "Waiting for input"
-    await sendHookEvent(serverConfig, idlePrompt(sessionId));
-    await expectOverlayVisible(frame, 'Waiting for input');
-
-    // 6. SessionEnd(exit) → agent is removed.
-    await sendHookEvent(serverConfig, sessionEndExit(sessionId));
-    await expectOverlayCount(frame, 0);
+    appendJsonlRecord(transcriptPath, buildUserToolResultRecord(taskToolId));
+    await expectOverlayCount(page, 1);
   });
 
-  // Fuel gauge + model name were team-only before this feature; this pins
-  // that a plain SOLO agent (no team, no teamName) also renders both once its
-  // transcript carries a message.model + message.usage record. The scenario
-  // appends the assistant record after spawn via the scenario builder (not a
-  // hand-fired hook) per the mocking model's process-boundary rule; the
-  // server's transcriptParser always extracts model/usage from JSONL
-  // (unconditional on hookDelivered), so this is exercised with hooks ON.
-  test('solo agent shows fuel gauge and shortened model name @area:spawn', async ({
-    pixelAgents,
+  // External hook-driven session adoption.
+  //
+  // Driven directly from the test via sendHookEvent for deterministic timing.
+  // The original VS Code version spawned mock-claude only to create the JSONL;
+  // here the transcript is hand-created and every lifecycle transition is a
+  // sent hook, matching the standalone template's discipline.
+  test('external Claude session adopted via hook confirmation lifecycle @area:spawn', async ({
+    page,
+    standalone,
   }) => {
-    const { frame, window, tmpHome, mockLogFile } = pixelAgents;
-
-    await setSettings(frame, {
-      watchAllSessions: false,
+    await setSettings(page, {
+      watchAllSessions: true,
       hooksEnabled: true,
       alwaysShowLabels: true,
       debugView: false,
     });
+    await standalone.drainMessages();
 
-    await arrangeNextClaudeInvocation(
-      tmpHome,
-      claudeScenario('solo agent model + token usage')
-        .at(500)
-        .appendJsonl({
-          type: 'assistant',
-          message: {
-            model: 'claude-opus-4-8',
-            usage: { input_tokens: 120_000, output_tokens: 5_000 },
-            content: [],
-          },
-        })
-        .build(),
+    const sessionId = 'external-hook-session';
+    const { transcriptPath } = createClaudeTranscript(
+      standalone.tmpHome,
+      standalone.workspaceDir,
+      sessionId,
     );
-    await spawnInternalAgentAndWait(frame, tmpHome, mockLogFile);
 
-    await openPixelAgentsPanel(window);
-    const panelFrame = await getPixelAgentsFrame(window);
-    const agentId = await expectSingleAgentOverlay(panelFrame);
+    // 1. SessionStart fires. Session is pending (transient filter), no overlay yet.
+    await sendHookEvent(
+      standalone.hookServerConfig,
+      sessionStartStartup(sessionId, standalone.workspaceDir, transcriptPath),
+    );
+    // Settle wait before the negative assertion: SessionStart only stages a
+    // pending session, so no overlay should appear. Without the wait,
+    // toHaveCount(0) passes instantly just because the overlay has not been
+    // created yet, which would not prove SessionStart stays invisible.
+    await page.waitForTimeout(500);
+    await expectOverlayCount(page, 0);
+
+    // 2. PreToolUseBash confirms the session; agent appears with bash status.
+    await sendHookEvent(standalone.hookServerConfig, preToolUseBash(sessionId, 'npm test'));
+    await expectOverlayCount(page, 1);
+    await expectOverlayVisible(page, 'Running: npm test');
+
+    // 3. PermissionRequest → "Needs approval"
+    await sendHookEvent(standalone.hookServerConfig, permissionRequest(sessionId));
+    await expectOverlayVisible(page, 'Needs approval');
+
+    // 4. Stop → finished turn shows ONLY the checkmark; the label falls back to
+    //    idle (no dedicated text), distinct from idle_prompt's "Waiting for input".
+    await sendHookEvent(standalone.hookServerConfig, stop(sessionId));
+    await expectOverlayVisible(page, 'Idle');
+
+    // 5. Notification(idle_prompt) → "Waiting for input"
+    await sendHookEvent(standalone.hookServerConfig, idlePrompt(sessionId));
+    await expectOverlayVisible(page, 'Waiting for input');
+
+    // 6. SessionEnd(exit) → agent is removed.
+    await sendHookEvent(standalone.hookServerConfig, sessionEndExit(sessionId));
+    await expectOverlayCount(page, 0);
+  });
+
+  // Fuel gauge + model name were team-only before this feature; this pins
+  // that a plain SOLO agent (no team, no teamName) also renders both once its
+  // transcript carries a message.model + message.usage record. The server's
+  // transcriptParser always extracts model/usage from JSONL (unconditional on
+  // hookDelivered), so this is exercised with hooks ON. The session is stood up
+  // via a hand-created transcript + SessionStart/PreToolUse hooks, then the
+  // model/usage record is appended to the transcript for the file-watcher.
+  test('solo agent shows fuel gauge and shortened model name @area:spawn', async ({
+    page,
+    standalone,
+  }) => {
+    await setSettings(page, {
+      watchAllSessions: true,
+      hooksEnabled: true,
+      alwaysShowLabels: true,
+      debugView: false,
+    });
+    await standalone.drainMessages();
+
+    const sessionId = 'solo-agent-session';
+    const { transcriptPath } = createClaudeTranscript(
+      standalone.tmpHome,
+      standalone.workspaceDir,
+      sessionId,
+    );
+
+    await sendHookEvent(
+      standalone.hookServerConfig,
+      sessionStartStartup(sessionId, standalone.workspaceDir, transcriptPath),
+    );
+    await sendHookEvent(standalone.hookServerConfig, preToolUseBash(sessionId, 'npm test'));
+    const agentId = await expectSingleAgentOverlay(page);
+
+    // Append an assistant record carrying model + token usage. This is the SOLO
+    // agent's only team-independent source of model/usage, so its presence is
+    // the whole point of the test.
+    appendJsonlRecord(transcriptPath, {
+      type: 'assistant',
+      message: {
+        model: 'claude-opus-4-8',
+        usage: { input_tokens: 120_000, output_tokens: 5_000 },
+        content: [],
+      },
+    });
 
     // Model line renders as the shortened form ("claude-opus-4-8" -> "opus 4.8").
-    await expectOverlayVisible(panelFrame, 'opus 4.8');
+    await expectOverlayVisible(page, 'opus 4.8');
 
     // Fuel gauge: the div whose title reads "<pct>% context used (<k>k tokens)".
-    // Before this feature the gauge only rendered for team agents; this agent
-    // has no teamName, so its presence here is the whole point of the test.
-    const gauge = getOverlayByAgentId(panelFrame, agentId).locator('div[title*="context used"]');
+    const gauge = getOverlayByAgentId(page, agentId).locator('div[title*="context used"]');
     await expect(gauge).toBeVisible({ timeout: 15_000 });
     await expect(gauge).toHaveAttribute('title', /^\d+% context used \(\d+k tokens\)$/);
   });

@@ -1,0 +1,48 @@
+=== BASELINE 101a316 ===
+-- vscode grep counts (server/core/webview) --
+server/src/configPersistence.ts:5
+server/src/agentRuntime.ts:1
+server/src/fileWatcher.ts:5
+server/src/assetLoader.ts:6
+server/src/fileStateAdapter.ts:1
+server/src/layoutPersistence.ts:1
+server/src/types.ts:2
+server/src/clientMessageHandler.ts:1
+core/src/terminalAdapter.ts:2
+webview-ui/src/transport/postMessageTransport.ts:3
+webview-ui/src/runtime.ts:2
+webview-ui/src/transport/index.ts:1
+-- adapters/vscode files --
+adapters/vscode/PixelAgentsViewProvider.ts
+adapters/vscode/agentManager.ts
+adapters/vscode/constants.ts
+adapters/vscode/extension.ts
+adapters/vscode/migrateVsCodeState.ts
+adapters/vscode/vscodeTerminalAdapter.ts
+-- e2e specs --
+e2e/tests/claude/hooks-off/lifecycle.spec.ts
+e2e/tests/claude/hooks-off/matrix.spec.ts
+e2e/tests/claude/hooks-off/pets.spec.ts
+e2e/tests/claude/hooks-on/basic.spec.ts
+e2e/tests/claude/hooks-on/lifecycle.spec.ts
+e2e/tests/claude/hooks-on/teams.spec.ts
+e2e/tests/standalone/hooks.spec.ts
+-- .github present? --
+NO .github/ CI config in tree
+
+=== AFTER 001-remove-vscode-extension ===
+-- vscode grep counts (server/core/webview) --
+(no matches)
+-- adapters/ directory --
+(removed)
+-- e2e fixtures --
+e2e/fixtures/standalone.ts (only fixture)
+-- .github present? --
+NO .github/ CI config in tree (no VS Code packaging/publish leg needed)
+-- build artifacts --
+dist/cli.js, dist/hooks/claude-hook.js, dist/webview/, dist/assets/ present
+dist/extension.js absent
+-- package.json --
+VS Code metadata removed, npm-only
+-- git diff stat --
+27 files changed, 575 insertions(+), 2963 deletions(-)

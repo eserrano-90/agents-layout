@@ -28,7 +28,7 @@ export interface ClientMessageContext {
   onSetHooksEnabled?: SetHooksEnabledSideEffect;
 }
 
-// ── Setting key constants (mirror adapters/vscode/constants.ts) ──
+// ── Setting key constants ──
 const KEY_SOUND_ENABLED = 'pixel-agents.soundEnabled';
 const KEY_LAST_SEEN_VERSION = 'pixel-agents.lastSeenVersion';
 const KEY_ALWAYS_SHOW_LABELS = 'pixel-agents.alwaysShowLabels';

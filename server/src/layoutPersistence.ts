@@ -56,9 +56,7 @@ interface LayoutLoadResult {
  * Load layout from file. Falls back to bundled default if the file is empty.
  * Resets to the bundled default when a newer revision is bundled.
  *
- * Migration from VS Code workspaceState happens earlier, in
- * adapters/vscode/migrateVsCodeState.ts (run on extension activate). By the
- * time this is called, the file is the only source of truth.
+ * The layout file is the only source of truth.
  *
  * 1. If file exists → return it (reset if bundled default has a newer revision)
  * 2. Else if defaultLayout provided → write to file, return it
