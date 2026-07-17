@@ -1,5 +1,4 @@
 import * as crypto from 'crypto';
-import type { FastifyInstance } from 'fastify';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -8,7 +7,8 @@ import type { AgentRuntime } from './agentRuntime.js';
 import type { AgentStateStore } from './agentStateStore.js';
 import type { AssetCache, SetHooksEnabledSideEffect } from './clientMessageHandler.js';
 import { SERVER_JSON_DIR, SERVER_JSON_NAME } from './constants.js';
-import { createHttpServer } from './httpServer.js';
+import { FastifyHttpAdapter } from './infrastructure/http/FastifyHttpAdapter.js';
+import { WebSocketAdapter } from './infrastructure/websocket/WebSocketAdapter.js';
 
 /** Discovery file written to ~/.pixel-agents/server.json so hook scripts can find the server. */
 export interface ServerConfig {
@@ -37,17 +37,18 @@ type HookEventCallback = (providerId: string, event: Record<string, unknown>) =>
  * Pixel Agents server: receives hook events, broadcasts state via WebSocket,
  * and optionally serves the SPA in standalone mode.
  *
- * Routes (via Fastify in httpServer.ts):
+ * Routes (via Fastify + WebSocketAdapter):
  * - `POST /api/hooks/:providerId` -- hook event (auth required, 64KB body limit)
  * - `GET /api/health` -- health check (no auth)
- * - `GET /ws` -- WebSocket for real-time agent state (auth required)
+ * - `GET /ws` -- WebSocket for real-time agent state (auth required in embedded mode)
  *
  * Discovery: writes `~/.pixel-agents/server.json` with port, PID, and auth token.
  * Multi-window: second VS Code window detects running server via server.json and
  * reuses it (does not start a second server).
  */
 export class PixelAgentsServer {
-  private app: FastifyInstance | null = null;
+  private httpAdapter: FastifyHttpAdapter | null = null;
+  private wsAdapter: WebSocketAdapter | null = null;
   private config: ServerConfig | null = null;
   private ownsServer = false;
   private callback: HookEventCallback | null = null;
@@ -86,27 +87,36 @@ export class PixelAgentsServer {
     const token = crypto.randomUUID();
     const store = options?.store;
 
-    const { app, port } = await createHttpServer({
-      embedded: options?.embedded ?? true,
-      host: options?.host,
-      port: options?.port,
-      token,
+    const wsAdapter = new WebSocketAdapter({
       store: store!,
       runtime: options?.runtime,
-      staticDir: options?.staticDir,
       assetCache: options?.assetCache,
-      onHookEvent: (providerId, event) => this.callback?.(providerId, event),
       onSetHooksEnabled: options?.onSetHooksEnabled,
+      embedded: options?.embedded ?? true,
     });
 
-    this.app = app;
+    const httpAdapter = new FastifyHttpAdapter({
+      embedded: options?.embedded ?? true,
+      token,
+      staticDir: options?.staticDir,
+      onHookEvent: (providerId, event) => this.callback?.(providerId, event),
+      registerPlugins: async (app) => {
+        wsAdapter.registerRoutes(app);
+      },
+    });
+
+    const { port } = await httpAdapter.start({
+      host: options?.host ?? '127.0.0.1',
+      port: options?.port ?? 0,
+    });
+
+    this.httpAdapter = httpAdapter;
+    this.wsAdapter = wsAdapter;
     this.config = {
       port,
       pid: process.pid,
       token,
       startedAt: Date.now(),
-      // Diagnostic-only: forward the debug-log path to the hook script via
-      // server.json (env vars don't reach the spawned hook reliably).
       ...(process.env['PIXEL_AGENTS_DEBUG_LOG']
         ? { debugLog: process.env['PIXEL_AGENTS_DEBUG_LOG'] }
         : {}),
@@ -120,9 +130,13 @@ export class PixelAgentsServer {
 
   /** Stop the server and clean up server.json (only if we own it). */
   stop(): void {
-    if (this.app) {
-      this.app.close();
-      this.app = null;
+    if (this.httpAdapter) {
+      this.httpAdapter.stop();
+      this.httpAdapter = null;
+    }
+    if (this.wsAdapter) {
+      this.wsAdapter.dispose();
+      this.wsAdapter = null;
     }
     if (this.ownsServer) {
       this.deleteServerJson();
