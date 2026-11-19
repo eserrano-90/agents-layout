@@ -108,13 +108,7 @@ describe('FileStateAdapter', () => {
   it('round-trips agents to the namespace-specific state file', () => {
     const adapter = new FileStateAdapter({ namespace: 'standalone' });
     const agents: PersistedAgent[] = [
-      {
-        id: 1,
-        sessionId: 'sess-1',
-        terminalName: 'Claude Code #1',
-        jsonlFile: '/tmp/sess-1.jsonl',
-        projectDir: '/tmp/proj',
-      },
+      { id: 1, clientId: 'client-a', sessionId: 'sess-1', folderName: 'proj' },
     ];
     adapter.saveAgents(agents);
     expect(adapter.loadAgents()).toEqual(agents);
@@ -130,22 +124,35 @@ describe('FileStateAdapter', () => {
   it('vscode and standalone state files are independent', () => {
     const vscode = new FileStateAdapter({ namespace: 'vscode' });
     const standalone = new FileStateAdapter({ namespace: 'standalone' });
-    const agentVs: PersistedAgent[] = [
-      { id: 1, terminalName: 'A', jsonlFile: '/a.jsonl', projectDir: '/proj' },
-    ];
-    const agentSa: PersistedAgent[] = [
-      { id: 9, terminalName: '', jsonlFile: '/b.jsonl', projectDir: '/proj' },
-    ];
+    const agentVs: PersistedAgent[] = [{ id: 1, clientId: 'client-a', sessionId: 'a' }];
+    const agentSa: PersistedAgent[] = [{ id: 9, clientId: 'client-b', sessionId: 'b' }];
     vscode.saveAgents(agentVs);
     standalone.saveAgents(agentSa);
     expect(vscode.loadAgents()).toEqual(agentVs);
     expect(standalone.loadAgents()).toEqual(agentSa);
   });
 
+  it('drops agent records written before agents were keyed by client', () => {
+    const adapter = new FileStateAdapter({ namespace: 'standalone' });
+    const stateFile = path.join(tempHome, '.pixel-agents', 'standalone-state.json');
+    fs.mkdirSync(path.dirname(stateFile), { recursive: true });
+    fs.writeFileSync(
+      stateFile,
+      JSON.stringify({
+        agents: [
+          { id: 1, terminalName: '', jsonlFile: '/old.jsonl', projectDir: '/proj' },
+          { id: 2, clientId: 'c', sessionId: 's' },
+        ],
+        seats: {},
+      }),
+    );
+    expect(adapter.loadAgents()).toEqual([{ id: 2, clientId: 'c', sessionId: 's' }]);
+  });
+
   it('preserves seats when saving agents (and vice versa)', () => {
     const adapter = new FileStateAdapter({ namespace: 'standalone' });
     adapter.saveSeats({ '1': { palette: 3 } });
-    adapter.saveAgents([{ id: 1, terminalName: 'x', jsonlFile: '/x.jsonl', projectDir: '/tmp' }]);
+    adapter.saveAgents([{ id: 1, clientId: 'client-a', sessionId: 'x' }]);
     expect(adapter.loadSeats()).toEqual({ '1': { palette: 3 } });
     expect(adapter.loadAgents()).toHaveLength(1);
   });

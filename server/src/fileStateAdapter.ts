@@ -7,10 +7,9 @@
  * Agents + seats (per adapter) persist to
  *   ~/.pixel-agents/<namespace>-state.json
  *
- * Runtime visibility (which agents show in the office) is scope-controlled by the
- * runtime scanner + Watch All Sessions toggle, not by persistence. Both adapters
- * can observe the same ~/.claude/projects/ filesystem; each keeps its own local
- * agent IDs and seat mappings.
+ * Persisted agents are identities only (client + session -> id). Which agents
+ * show in the office is decided by what emitting clients report, not by
+ * persistence.
  */
 
 import * as fs from 'fs';
@@ -105,7 +104,13 @@ export class FileStateAdapter implements StateAdapter {
       const raw = fs.readFileSync(this.stateFilePath, 'utf-8');
       const parsed = JSON.parse(raw) as Partial<AdapterState>;
       return {
-        agents: Array.isArray(parsed.agents) ? (parsed.agents as PersistedAgent[]) : [],
+        // Records written before agents were keyed by client lack a clientId;
+        // they cannot be matched to a client and are dropped.
+        agents: Array.isArray(parsed.agents)
+          ? (parsed.agents as PersistedAgent[]).filter(
+              (a) => typeof a?.clientId === 'string' && typeof a.sessionId === 'string',
+            )
+          : [],
         seats:
           parsed.seats && typeof parsed.seats === 'object'
             ? (parsed.seats as AdapterState['seats'])

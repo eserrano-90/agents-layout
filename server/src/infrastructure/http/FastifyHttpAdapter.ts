@@ -4,16 +4,15 @@ import type { FastifyInstance } from 'fastify';
 import Fastify from 'fastify';
 
 import type { HttpServer, HttpServerHandle,HttpServerOptions } from '../../application/ports/HttpServer.js';
-import { MAX_HOOK_BODY_SIZE } from '../../constants.js';
+import type { IngestService } from '../../ingestService.js';
 import { registerHealthRoute } from './plugins/healthPlugin.js';
-import { registerHookRoute } from './plugins/hookPlugin.js';
+import { registerIngestRoute } from './plugins/ingestPlugin.js';
 import { registerStaticRoutes } from './plugins/staticPlugin.js';
 
 export interface FastifyHttpAdapterOptions {
   embedded: boolean;
-  token: string;
   staticDir?: string;
-  onHookEvent?: (providerId: string, event: Record<string, unknown>) => void;
+  ingest: IngestService;
   registerPlugins?: (app: FastifyInstance) => Promise<void>;
 }
 
@@ -25,8 +24,12 @@ export class FastifyHttpAdapter implements HttpServer {
 
   async start(options: HttpServerOptions): Promise<HttpServerHandle> {
     const app = Fastify({
-      logger: !this.opts.embedded,
-      bodyLimit: MAX_HOOK_BODY_SIZE,
+      logger: false,
+    });
+    // Answer malformed JSON / oversized bodies in the ingest response shape.
+    app.setErrorHandler((err: { statusCode?: number; message?: string }, _request, reply) => {
+      const status = err.statusCode && err.statusCode >= 400 ? err.statusCode : 500;
+      reply.code(status).send({ ok: false, error: err.message ?? 'error' });
     });
 
     await app.register(fastifyCors, { origin: true });
@@ -37,10 +40,7 @@ export class FastifyHttpAdapter implements HttpServer {
     }
 
     registerHealthRoute(app);
-    registerHookRoute(app, {
-      token: this.opts.token,
-      onHookEvent: this.opts.onHookEvent,
-    });
+    registerIngestRoute(app, this.opts.ingest);
 
     if (this.opts.registerPlugins) {
       await this.opts.registerPlugins(app);

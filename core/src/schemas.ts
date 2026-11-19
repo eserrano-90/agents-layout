@@ -5,20 +5,14 @@
 
 // ── Agent State ──────────────────────────────────────────────
 
-/** Persisted agent data (survives F5 reload / restart) */
+/** Persisted agent identity (survives a server restart). Restored agents stay
+ *  hidden until their emitting client confirms them in a snapshot; the record
+ *  only lets a confirmed agent keep its id, and with it its seat. */
 export interface PersistedAgent {
   id: number;
-  sessionId?: string;
-  terminalName: string;
-  isExternal?: boolean;
-  jsonlFile: string;
-  projectDir: string;
+  clientId: string;
+  sessionId: string;
   folderName?: string;
-  teamName?: string;
-  agentName?: string;
-  isTeamLead?: boolean;
-  leadAgentId?: number;
-  teamUsesTmux?: boolean;
 }
 
 /** Agent seat assignment with visual identity */

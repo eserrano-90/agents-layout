@@ -1,7 +1,6 @@
 export interface Session {
   readonly sessionId: string;
   readonly projectDir?: string;
-  readonly jsonlFile?: string;
   readonly startedAt: number;
   agentId?: number;
   transcriptPath?: string;
@@ -9,12 +8,12 @@ export interface Session {
 
 export function createSession(
   sessionId: string,
-  opts?: { projectDir?: string; jsonlFile?: string; agentId?: number },
+  opts?: { projectDir?: string; transcriptPath?: string; agentId?: number },
 ): Session {
   return {
     sessionId,
     projectDir: opts?.projectDir,
-    jsonlFile: opts?.jsonlFile,
+    transcriptPath: opts?.transcriptPath,
     startedAt: Date.now(),
     agentId: opts?.agentId,
   };

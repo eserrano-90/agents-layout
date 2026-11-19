@@ -1,14 +1,22 @@
-import type { AgentRuntime } from './agentRuntime.js';
+import type { AgentEventReducer } from './agentEventReducer.js';
 import type { AgentStateStore } from './agentStateStore.js';
 import type { LoadedAssets, LoadedCharacterSprites, LoadedPetSprites } from './assetLoader.js';
 import { readConfig, writeConfig } from './configPersistence.js';
+import type { DailyUsageTracker } from './dailyUsageTracker.js';
+import type { IngestService } from './ingestService.js';
 import { readLayoutFromFile, writeLayoutToFile } from './layoutPersistence.js';
-import { claudeProvider } from './providers/index.js';
 
 type WsSend = (message: Record<string, unknown>) => void;
 
-/** Async hook toggle side effect (install/uninstall + script copy). Provided by cli.ts. */
-export type SetHooksEnabledSideEffect = (enabled: boolean) => Promise<void> | void;
+/**
+ * Settings that belong to an emitting client running in the same process
+ * (all-in-one mode). Absent in server-only mode, where the UI hides them.
+ */
+export interface LocalClientControl {
+  getSettings(): { hooksEnabled: boolean; watchAllSessions: boolean };
+  setHooksEnabled(enabled: boolean): Promise<void> | void;
+  setWatchAllSessions(enabled: boolean): void;
+}
 
 /** Cached assets loaded at server startup. Sent to each WebSocket client on webviewReady. */
 export interface AssetCache {
@@ -22,18 +30,17 @@ export interface AssetCache {
 
 export interface ClientMessageContext {
   store: AgentStateStore;
-  runtime?: AgentRuntime;
   cache: AssetCache | null;
-  /** Install/uninstall hooks side effect. Needs server url+token known only to cli.ts. */
-  onSetHooksEnabled?: SetHooksEnabledSideEffect;
+  reducer?: AgentEventReducer;
+  ingest?: IngestService;
+  dailyUsage?: DailyUsageTracker;
+  localClient?: LocalClientControl;
 }
 
 // ── Setting key constants ──
 const KEY_SOUND_ENABLED = 'pixel-agents.soundEnabled';
 const KEY_LAST_SEEN_VERSION = 'pixel-agents.lastSeenVersion';
 const KEY_ALWAYS_SHOW_LABELS = 'pixel-agents.alwaysShowLabels';
-const KEY_WATCH_ALL_SESSIONS = 'pixel-agents.watchAllSessions';
-const KEY_HOOKS_ENABLED = 'pixel-agents.hooksEnabled';
 const KEY_HOOKS_INFO_SHOWN = 'pixel-agents.hooksInfoShown';
 
 /**
@@ -48,7 +55,7 @@ export function handleClientMessage(
   send: WsSend,
   ctx: ClientMessageContext,
 ): void {
-  const { store, runtime } = ctx;
+  const { store } = ctx;
   const adapter = store.getAdapter();
 
   switch (msg.type) {
@@ -82,20 +89,14 @@ export function handleClientMessage(
       adapter?.setSetting(KEY_ALWAYS_SHOW_LABELS, msg.enabled);
       break;
 
-    case 'setWatchAllSessions': {
-      const enabled = msg.enabled as boolean;
-      adapter?.setSetting(KEY_WATCH_ALL_SESSIONS, enabled);
-      if (runtime) runtime.watchAllSessions.current = enabled;
+    // Client settings: only meaningful with a co-located client.
+    case 'setWatchAllSessions':
+      ctx.localClient?.setWatchAllSessions(msg.enabled === true);
       break;
-    }
 
-    case 'setHooksEnabled': {
-      const enabled = msg.enabled as boolean;
-      adapter?.setSetting(KEY_HOOKS_ENABLED, enabled);
-      if (runtime) runtime.hooksEnabled.current = enabled;
-      void ctx.onSetHooksEnabled?.(enabled);
+    case 'setHooksEnabled':
+      void ctx.localClient?.setHooksEnabled(msg.enabled === true);
       break;
-    }
 
     case 'setHooksInfoShown':
       adapter?.setSetting(KEY_HOOKS_INFO_SHOWN, true);
@@ -131,14 +132,15 @@ export function handleClientMessage(
 }
 
 function handleWebviewReady(send: WsSend, ctx: ClientMessageContext): void {
-  const { store, runtime, cache } = ctx;
+  const { store, cache, reducer, ingest } = ctx;
   const adapter = store.getAdapter();
 
-  // 1. Provider capabilities (must arrive before any agent messages)
+  // 1. Tool capabilities learned from events so far (must arrive before any
+  //    agent messages; updated live as new tool names appear).
   send({
     type: 'providerCapabilities',
-    readingTools: [...claudeProvider.readingTools],
-    subagentToolNames: [...claudeProvider.subagentToolNames],
+    readingTools: [...(reducer?.readingTools ?? [])],
+    subagentToolNames: [...(reducer?.subagentToolNames ?? [])],
   });
 
   // 2. Assets (from server cache, loaded at startup via pngjs)
@@ -174,34 +176,26 @@ function handleWebviewReady(send: WsSend, ctx: ClientMessageContext): void {
 
   // 4. Settings (from adapter, with sensible defaults when adapter is absent)
   const cfg = readConfig();
-  const watchAllSessions = adapter?.getSetting(KEY_WATCH_ALL_SESSIONS, false) ?? false;
-  const hooksEnabled = adapter?.getSetting(KEY_HOOKS_ENABLED, true) ?? true;
+  const clientSettings = ctx.localClient?.getSettings();
   send({
     type: 'settingsLoaded',
     soundEnabled: adapter?.getSetting(KEY_SOUND_ENABLED, true) ?? true,
     lastSeenVersion: adapter?.getSetting(KEY_LAST_SEEN_VERSION, '') ?? '',
     extensionVersion: process.env.PIXEL_AGENTS_VERSION ?? '',
-    watchAllSessions,
+    watchAllSessions: clientSettings?.watchAllSessions ?? false,
     alwaysShowLabels: adapter?.getSetting(KEY_ALWAYS_SHOW_LABELS, false) ?? false,
-    hooksEnabled,
+    hooksEnabled: clientSettings?.hooksEnabled ?? false,
     hooksInfoShown: adapter?.getSetting(KEY_HOOKS_INFO_SHOWN, false) ?? false,
     externalAssetDirectories: cfg.externalAssetDirectories,
+    localClient: ctx.localClient !== undefined,
   });
 
-  // Sync runtime refs with the persisted settings so scanners behave correctly
-  // from the first tick after a server restart.
-  if (runtime) {
-    runtime.watchAllSessions.current = watchAllSessions;
-    runtime.hooksEnabled.current = hooksEnabled;
-  }
-
-  // 5. Restore persisted external agents (standalone only; VS Code handles its own restore)
-  runtime?.restoreExternalAgents();
-
-  // 6. Existing agents (either just restored, or from VS Code adapter if present)
+  // 5. Existing agents. Client labels only when several clients feed this office.
+  const showClientLabels = (ingest?.connectedClients().length ?? 0) > 1;
   const agentIds: number[] = [];
   const folderNames: Record<number, string> = {};
   const externalAgents: Record<number, boolean> = {};
+  const clientLabels: Record<number, string> = {};
   for (const [id, agent] of store) {
     agentIds.push(id);
     if (agent.folderName) {
@@ -210,6 +204,8 @@ function handleWebviewReady(send: WsSend, ctx: ClientMessageContext): void {
     if (agent.isExternal) {
       externalAgents[id] = true;
     }
+    const label = showClientLabels ? ingest?.labelOf(agent.clientId) : undefined;
+    if (label) clientLabels[id] = label;
   }
   const seats = adapter?.loadSeats() ?? {};
   send({
@@ -218,6 +214,7 @@ function handleWebviewReady(send: WsSend, ctx: ClientMessageContext): void {
     agentMeta: seats,
     folderNames,
     externalAgents,
+    ...(showClientLabels ? { clientLabels } : {}),
   });
 
   // Replay per-agent token + model snapshot so a reconnecting client shows
@@ -238,7 +235,7 @@ function handleWebviewReady(send: WsSend, ctx: ClientMessageContext): void {
   }
 
   // Global daily usage snapshot (tokens + estimated cost for today).
-  if (runtime) {
-    send({ type: 'dailyUsage', ...runtime.dailyUsage.snapshot() });
+  if (ctx.dailyUsage) {
+    send({ type: 'dailyUsage', ...ctx.dailyUsage.snapshot() });
   }
 }

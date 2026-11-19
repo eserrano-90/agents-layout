@@ -41,10 +41,9 @@ function copyAssets() {
 function buildHooks() {
   const entry = path.join(
     __dirname,
-    'server',
+    'client',
     'src',
     'providers',
-    'hook',
     'claude',
     'hooks',
     'claude-hook.ts',
@@ -83,9 +82,9 @@ const esbuildProblemMatcherPlugin = {
 };
 
 async function main() {
-  // Standalone CLI is the only bundled entry point.
+  // The CLI (all-in-one, server and client modes) is the only bundled entry point.
   const ctx = await esbuild.context({
-    entryPoints: ['server/src/cli.ts'],
+    entryPoints: ['cli/src/cli.ts'],
     bundle: true,
     format: 'cjs',
     minify: production,
@@ -93,7 +92,7 @@ async function main() {
     sourcesContent: false,
     platform: 'node',
     outfile: 'dist/cli.js',
-    external: ['fastify', '@fastify/websocket', '@fastify/static', '@fastify/cors'],
+    external: ['fastify', '@fastify/websocket', '@fastify/static', '@fastify/cors', 'ajv'],
     define: versionDefine,
     logLevel: 'silent',
     plugins: [esbuildProblemMatcherPlugin],

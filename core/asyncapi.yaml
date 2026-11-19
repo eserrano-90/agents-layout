@@ -19,6 +19,12 @@ info:
     The protocol is provider-agnostic: a HookProvider implementation defines how raw
     CLI events are normalized to the AgentEvent shape, which the server translates
     into ServerMessage broadcasts.
+
+    A second, one-way HTTP channel (`/api/ingest`) carries normalized agent events
+    from emitting clients to the server. Clients observe agent sessions on the
+    developer's machine; the server only receives events and renders them. Any
+    program that posts contract-conforming IngestRequest batches with a valid
+    token is a valid client.
   license:
     name: MIT
   contact:
@@ -31,6 +37,10 @@ servers:
     protocol: ws
     description: Local Pixel Agents server (default port 3100)
     pathname: /ws
+  ingest:
+    host: 127.0.0.1:3100
+    protocol: http
+    description: HTTP ingest endpoint of the Pixel Agents server (same port as /ws)
 
 channels:
   ws:
@@ -44,6 +54,20 @@ channels:
         $ref: '#/components/messages/ServerMessage'
       ClientMessage:
         $ref: '#/components/messages/ClientMessage'
+  ingest:
+    address: /api/ingest
+    description: |
+      One-way event ingestion. An emitting client POSTs an IngestRequest (a batch of
+      normalized agent events, authenticated with `Authorization: Bearer <token>`)
+      and the server answers with an IngestResponse. The server never initiates;
+      anything it needs from a client (a resync) is requested in the response.
+    servers:
+      - $ref: '#/servers/ingest'
+    messages:
+      IngestRequest:
+        $ref: '#/components/messages/IngestRequest'
+      IngestResponse:
+        $ref: '#/components/messages/IngestResponse'
 
 operations:
   receiveServerMessage:
@@ -58,6 +82,20 @@ operations:
       $ref: '#/channels/ws'
     messages:
       - $ref: '#/channels/ws/messages/ClientMessage'
+  sendIngestRequest:
+    action: send
+    channel:
+      $ref: '#/channels/ingest'
+    bindings:
+      http:
+        method: POST
+    messages:
+      - $ref: '#/channels/ingest/messages/IngestRequest'
+    reply:
+      channel:
+        $ref: '#/channels/ingest'
+      messages:
+        - $ref: '#/channels/ingest/messages/IngestResponse'
 
 components:
   messages:
@@ -71,6 +109,16 @@ components:
       summary: Any command sent by a client to the server.
       payload:
         $ref: '#/components/schemas/ClientMessage'
+    IngestRequest:
+      title: Client-to-server event batch
+      summary: A batch of normalized agent events from one emitting client.
+      payload:
+        $ref: '#/components/schemas/IngestRequest'
+    IngestResponse:
+      title: Server reply to an event batch
+      summary: Acknowledgement, rejection, or resync request for a batch.
+      payload:
+        $ref: '#/components/schemas/IngestResponse'
 
   schemas:
     # ── Top-level discriminated unions ────────────────────────────
@@ -101,6 +149,8 @@ components:
         - $ref: '#/components/schemas/AgentTokenUsage'
         - $ref: '#/components/schemas/AgentModelInfo'
         - $ref: '#/components/schemas/DailyUsage'
+        # Emitting clients
+        - $ref: '#/components/schemas/AgentClientLabels'
         # Layout
         - $ref: '#/components/schemas/LayoutLoaded'
         # Assets
@@ -177,6 +227,11 @@ components:
           type: string
         isExternal:
           type: boolean
+        clientLabel:
+          type: string
+          description: >-
+            Label of the emitting client this agent belongs to. Only present
+            when more than one client is connected.
 
     AgentClosed:
       description: An agent has been removed from the office.
@@ -229,6 +284,13 @@ components:
           description: Map of agent ID (string) to external flag.
           additionalProperties:
             type: boolean
+        clientLabels:
+          type: object
+          description: >-
+            Map of agent ID (string) to the label of the emitting client it
+            belongs to. Only present when more than one client is connected.
+          additionalProperties:
+            type: string
 
     AgentStatus:
       description: Active vs waiting state for an agent (drives character animation).
@@ -428,6 +490,23 @@ components:
           type: integer
         model:
           type: string
+
+    AgentClientLabels:
+      description: |
+        Client label of every agent, sent whenever the set of connected clients
+        changes. Labels are only shown when more than one client is connected;
+        an empty map means "show no client labels".
+      type: object
+      additionalProperties: false
+      required: [type, labels]
+      properties:
+        type:
+          const: agentClientLabels
+        labels:
+          type: object
+          description: Map of agent ID (string) to client label.
+          additionalProperties:
+            type: string
 
     DailyUsage:
       description: |
@@ -671,6 +750,12 @@ components:
           type: array
           items:
             type: string
+        localClient:
+          type: boolean
+          description: >-
+            True when the server has a co-located emitting client (all-in-one
+            mode). The hooks and watch-all-sessions settings act on that client;
+            when false or absent in server-only mode the UI hides them.
 
     ExternalAssetDirectoriesUpdated:
       description: External asset directory list changed (after add/remove).
@@ -1031,3 +1116,461 @@ components:
           type: string
         frame:
           type: integer
+
+    # ── Ingest contract (emitting client → server, POST /api/ingest) ──
+
+    IngestRequest:
+      description: |
+        One batch of normalized agent events from a single emitting client. An empty
+        `events` array is a heartbeat. Batches from one client are applied in `seq`
+        order; a batch whose `seq` was already applied is acknowledged and ignored.
+      type: object
+      additionalProperties: false
+      required: [protocolVersion, clientId, seq, sentAt, events]
+      properties:
+        protocolVersion:
+          type: integer
+          minimum: 1
+          description: Ingest contract version this request was built for.
+        clientId:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Stable identifier of the emitting client. Must match the token's client.
+        label:
+          type: string
+          maxLength: 128
+          description: Human-readable client label shown in the office (e.g. "ana@laptop").
+        seq:
+          type: integer
+          minimum: 1
+          description: >-
+            Per-client batch counter. Starts at 1 for each client process and
+            increases by 1 per batch. A request carrying `snapshot` resets the
+            server's expectation to this value.
+        sentAt:
+          type: number
+          description: Client clock at send time (ms since epoch).
+        events:
+          type: array
+          maxItems: 512
+          items:
+            $ref: '#/components/schemas/IngestEvent'
+        snapshot:
+          $ref: '#/components/schemas/IngestSnapshot'
+        goodbye:
+          type: boolean
+          description: True on the client's final batch before a clean shutdown.
+
+    IngestEvent:
+      description: One normalized agent event for one session.
+      type: object
+      additionalProperties: false
+      required: [sessionId, origin, ts, event]
+      properties:
+        sessionId:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: Session identifier, unique within the emitting client.
+        origin:
+          $ref: '#/components/schemas/IngestEventOrigin'
+        ts:
+          type: number
+          description: Client clock when the event was observed (ms since epoch).
+        event:
+          $ref: '#/components/schemas/AgentEvent'
+
+    IngestEventOrigin:
+      description: |
+        Where the client observed the event. `hook` events come from the agent
+        tool's hooks API (instant, authoritative); `transcript` events are derived
+        from the session transcript. The server suppresses its heuristic timers
+        for a session once it has seen a `hook` event for it.
+      type: string
+      enum: [hook, transcript]
+
+    IngestSnapshot:
+      description: |
+        The complete list of sessions that are live on the client. Sent on the
+        client's first request, after the server asks for a resync, and after the
+        client dropped events from its queue. The server makes that client's
+        agents match this list.
+      type: object
+      additionalProperties: false
+      required: [sessions]
+      properties:
+        sessions:
+          type: array
+          maxItems: 512
+          items:
+            $ref: '#/components/schemas/IngestSnapshotSession'
+
+    IngestSnapshotSession:
+      description: One live session in a snapshot, with what the server needs to rebuild it.
+      type: object
+      additionalProperties: false
+      required: [sessionId]
+      properties:
+        sessionId:
+          type: string
+          minLength: 1
+          maxLength: 256
+        folderName:
+          type: string
+        cwd:
+          type: string
+          description: Working directory on the client's machine. Opaque label for the server.
+        transcriptPath:
+          type: string
+          description: Transcript path on the client's machine. Opaque label for the server.
+        hooksOnly:
+          type: boolean
+        hookDelivered:
+          type: boolean
+          description: True when the client has received hook events for this session.
+        team:
+          $ref: '#/components/schemas/SessionTeam'
+
+    IngestResponse:
+      description: Server reply to an IngestRequest.
+      type: object
+      additionalProperties: false
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+        appliedSeq:
+          type: integer
+          description: Highest batch `seq` the server has applied for this client.
+        resync:
+          type: boolean
+          description: True when the client must send a snapshot on its next request.
+        error:
+          type: string
+        eventIndex:
+          type: integer
+          description: Index in `events` of the first event that failed validation.
+        supportedVersions:
+          type: array
+          items:
+            type: integer
+          description: Contract versions this server accepts (sent on a version mismatch).
+
+    SessionTeam:
+      description: Team membership of a session (lead or teammate).
+      type: object
+      additionalProperties: false
+      properties:
+        teamName:
+          type: string
+        agentName:
+          type: string
+          description: Teammate name. Absent for the team lead.
+        leadSessionId:
+          type: string
+          description: Session of the team lead, when this session is a teammate.
+        isTeamLead:
+          type: boolean
+          description: True when this session is the lead of its team.
+        usesTmux:
+          type: boolean
+          description: >-
+            True when the team's teammates run as separate sessions with their
+            own hooks, rather than in-process with the lead.
+
+    AgentActivityKind:
+      description: Which character animation a tool should play.
+      type: string
+      enum: [reading, typing]
+
+    SubagentTurnEndReason:
+      description: Why a sub-agent's turn ended.
+      type: string
+      enum: [idle, completed]
+
+    AgentEvent:
+      description: Normalized, tool-agnostic agent event.
+      oneOf:
+        - $ref: '#/components/schemas/SessionStartEvent'
+        - $ref: '#/components/schemas/SessionEndEvent'
+        - $ref: '#/components/schemas/SessionReplacedEvent'
+        - $ref: '#/components/schemas/ToolStartEvent'
+        - $ref: '#/components/schemas/ToolEndEvent'
+        - $ref: '#/components/schemas/BackgroundToolEndEvent'
+        - $ref: '#/components/schemas/TurnEndEvent'
+        - $ref: '#/components/schemas/SubagentStartEvent'
+        - $ref: '#/components/schemas/SubagentEndEvent'
+        - $ref: '#/components/schemas/SubagentTurnEndEvent'
+        - $ref: '#/components/schemas/ProgressEvent'
+        - $ref: '#/components/schemas/PermissionRequestEvent'
+        - $ref: '#/components/schemas/TextOutputEvent'
+        - $ref: '#/components/schemas/UserPromptEvent'
+        - $ref: '#/components/schemas/TokenUsageEvent'
+        - $ref: '#/components/schemas/ModelInfoEvent'
+        - $ref: '#/components/schemas/TeamInfoEvent'
+      discriminator: kind
+
+    SessionStartEvent:
+      description: |
+        A session became live on the client. Creates the agent when the server
+        does not know the session yet; otherwise only confirms it.
+      type: object
+      additionalProperties: false
+      required: [kind]
+      properties:
+        kind:
+          const: sessionStart
+        source:
+          type: string
+          description: Why the session started (e.g. startup, resume, clear).
+        folderName:
+          type: string
+          description: Short project label to show next to the character.
+        cwd:
+          type: string
+          description: Working directory on the client's machine. Opaque label for the server.
+        transcriptPath:
+          type: string
+          description: Transcript path on the client's machine. Opaque label for the server.
+        hooksOnly:
+          type: boolean
+          description: True when the session has no transcript and all state comes from hooks.
+        team:
+          $ref: '#/components/schemas/SessionTeam'
+
+    SessionEndEvent:
+      description: The session ended or went stale. Removes the agent.
+      type: object
+      additionalProperties: false
+      required: [kind]
+      properties:
+        kind:
+          const: sessionEnd
+        reason:
+          type: string
+
+    SessionReplacedEvent:
+      description: |
+        The session in the wrapper's `sessionId` replaces `previousSessionId`
+        (for example after a clear). The agent keeps its character and seat.
+      type: object
+      additionalProperties: false
+      required: [kind, previousSessionId]
+      properties:
+        kind:
+          const: sessionReplaced
+        previousSessionId:
+          type: string
+        transcriptPath:
+          type: string
+          description: Transcript path of the new session. Opaque label for the server.
+
+    ToolStartEvent:
+      description: The agent began executing a tool.
+      type: object
+      additionalProperties: false
+      required: [kind, toolId, toolName, statusText, activity, permissionExempt, spawnsSubagent]
+      properties:
+        kind:
+          const: toolStart
+        toolId:
+          type: string
+        toolName:
+          type: string
+        statusText:
+          type: string
+          maxLength: 256
+          description: Human-readable status to display (e.g. "Reading main.ts").
+        activity:
+          $ref: '#/components/schemas/AgentActivityKind'
+        permissionExempt:
+          type: boolean
+          description: True when the tool never waits on a user permission prompt.
+        spawnsSubagent:
+          type: boolean
+          description: True when the tool spawns a sub-agent character.
+        spawnsTeammate:
+          type: boolean
+          description: True when this specific call spawns a persistent teammate.
+        runInBackground:
+          type: boolean
+
+    ToolEndEvent:
+      description: |
+        A tool finished. `toolId` is "current" when the source does not carry the
+        id and the server should end the tool most recently started by a hook.
+      type: object
+      additionalProperties: false
+      required: [kind, toolId]
+      properties:
+        kind:
+          const: toolEnd
+        toolId:
+          type: string
+        backgroundLaunched:
+          type: boolean
+          description: >-
+            True when the result only confirms that a background sub-agent was
+            launched; the sub-agent itself keeps running.
+
+    BackgroundToolEndEvent:
+      description: A background sub-agent tool reported its result through the queue.
+      type: object
+      additionalProperties: false
+      required: [kind, toolId]
+      properties:
+        kind:
+          const: backgroundToolEnd
+        toolId:
+          type: string
+          description: Id of the background sub-agent tool that finished.
+
+    TurnEndEvent:
+      description: The agent finished its turn.
+      type: object
+      additionalProperties: false
+      required: [kind]
+      properties:
+        kind:
+          const: turnEnd
+        awaitingInput:
+          type: boolean
+          description: True when the agent went idle waiting on the user.
+
+    SubagentStartEvent:
+      description: |
+        A sub-agent started, or a sub-agent began a tool. `parentToolId` is
+        "current" when the source does not carry it.
+      type: object
+      additionalProperties: false
+      required: [kind, parentToolId, toolId, toolName, statusText, permissionExempt]
+      properties:
+        kind:
+          const: subagentStart
+        parentToolId:
+          type: string
+        toolId:
+          type: string
+        toolName:
+          type: string
+        statusText:
+          type: string
+          maxLength: 256
+        permissionExempt:
+          type: boolean
+          description: True when the sub-agent's tool never waits on a user permission prompt.
+        runInBackground:
+          type: boolean
+
+    SubagentEndEvent:
+      description: A sub-agent stopped, or a sub-agent's tool finished.
+      type: object
+      additionalProperties: false
+      required: [kind, parentToolId, toolId]
+      properties:
+        kind:
+          const: subagentEnd
+        parentToolId:
+          type: string
+        toolId:
+          type: string
+
+    SubagentTurnEndEvent:
+      description: A teammate went idle or reported its task complete.
+      type: object
+      additionalProperties: false
+      required: [kind, parentToolId, reason]
+      properties:
+        kind:
+          const: subagentTurnEnd
+        parentToolId:
+          type: string
+        reason:
+          $ref: '#/components/schemas/SubagentTurnEndReason'
+        teammateName:
+          type: string
+          description: Name of the teammate the event is about, when the source carries it.
+
+    ProgressEvent:
+      description: |
+        Evidence that the session is still producing data. Without `toolId`: a
+        new batch of transcript data arrived (the server cancels its heuristic
+        timers). With `toolId`: that tool reported it is still running (the
+        server restarts its permission heuristic for it).
+      type: object
+      additionalProperties: false
+      required: [kind]
+      properties:
+        kind:
+          const: progress
+        toolId:
+          type: string
+
+    PermissionRequestEvent:
+      description: The agent is waiting on a user permission prompt.
+      type: object
+      additionalProperties: false
+      required: [kind]
+      properties:
+        kind:
+          const: permissionRequest
+
+    TextOutputEvent:
+      description: The agent produced text without using a tool. Carries no text.
+      type: object
+      additionalProperties: false
+      required: [kind]
+      properties:
+        kind:
+          const: textOutput
+
+    UserPromptEvent:
+      description: The user submitted a prompt, starting a new turn. Carries no text.
+      type: object
+      additionalProperties: false
+      required: [kind]
+      properties:
+        kind:
+          const: userPrompt
+
+    TokenUsageEvent:
+      description: Token usage of one assistant message (deltas, not totals).
+      type: object
+      additionalProperties: false
+      required: [kind, inputTokens, outputTokens]
+      properties:
+        kind:
+          const: tokenUsage
+        inputTokens:
+          type: integer
+          minimum: 0
+        outputTokens:
+          type: integer
+          minimum: 0
+        model:
+          type: string
+
+    ModelInfoEvent:
+      description: The model backing the session.
+      type: object
+      additionalProperties: false
+      required: [kind, model]
+      properties:
+        kind:
+          const: modelInfo
+        model:
+          type: string
+
+    TeamInfoEvent:
+      description: |
+        The session's team membership changed. Carries the complete membership as
+        resolved by the client; the server replaces what it had.
+      type: object
+      additionalProperties: false
+      required: [kind, team]
+      properties:
+        kind:
+          const: teamInfo
+        team:
+          $ref: '#/components/schemas/SessionTeam'

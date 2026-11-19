@@ -27,6 +27,7 @@ export type ServerMessage =
   | AgentTokenUsage
   | AgentModelInfo
   | DailyUsage
+  | AgentClientLabels
   | LayoutLoaded
   | FurnitureAssetsLoaded
   | CharacterSpritesLoaded
@@ -69,6 +70,7 @@ export interface AgentCreated {
   id: number;
   folderName?: string;
   isExternal?: boolean;
+  clientLabel?: string;
 }
 
 export interface AgentClosed {
@@ -87,6 +89,7 @@ export interface ExistingAgents {
   agentMeta: Record<string, AgentSeatMeta>;
   folderNames: Record<string, string>;
   externalAgents: Record<string, boolean>;
+  clientLabels?: Record<string, string>;
 }
 
 export interface AgentSeatMeta {
@@ -201,6 +204,11 @@ export interface DailyUsageModel {
   costUsd: number;
 }
 
+export interface AgentClientLabels {
+  type: 'agentClientLabels';
+  labels: Record<string, string>;
+}
+
 export interface LayoutLoaded {
   type: 'layoutLoaded';
   layout: Record<string, any> | null;
@@ -281,6 +289,7 @@ export interface SettingsLoaded {
   hooksEnabled: boolean;
   hooksInfoShown: boolean;
   externalAssetDirectories: string[];
+  localClient?: boolean;
 }
 
 export interface ExternalAssetDirectoriesUpdated {
