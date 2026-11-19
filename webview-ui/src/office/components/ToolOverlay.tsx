@@ -209,7 +209,8 @@ export function ToolOverlay({
         const teamRoleLabel = ch.isTeamLead ? 'LEAD' : ch.agentName || null;
         const totalTokens = ch.inputTokens + ch.outputTokens;
         const tokenRatio = totalTokens / MAX_CONTEXT_TOKENS;
-        const hasExtraLines = !!(ch.folderName || teamRoleLabel || (!isSub && ch.model));
+        const locationLabel = [ch.folderName, ch.clientLabel].filter(Boolean).join(' · ');
+        const hasExtraLines = !!(locationLabel || teamRoleLabel || (!isSub && ch.model));
 
         return (
           <div
@@ -254,9 +255,9 @@ export function ToolOverlay({
                 >
                   {activityText}
                 </span>
-                {ch.folderName && (
+                {locationLabel && (
                   <span className="text-2xs leading-none overflow-hidden text-ellipsis block">
-                    {ch.folderName}
+                    {locationLabel}
                   </span>
                 )}
                 {!isSub && ch.model && (

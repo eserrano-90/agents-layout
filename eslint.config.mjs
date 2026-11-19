@@ -37,5 +37,34 @@ export default [
       'pixel-agents/no-inline-colors': 'error',
     },
   },
+  // Layering: client/ (emitter) and server/ (receiver + viewer) never import
+  // each other. Only cli/ composes both. Both may import core/.
+  {
+    files: ['server/**/*.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        { patterns: [{ group: ['**/client/src/**', '**/cli/src/**'], message: 'server/ must not import client/ or cli/ (see openspec deployment-modes).' }] },
+      ],
+    },
+  },
+  {
+    files: ['client/**/*.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        { patterns: [{ group: ['**/server/src/**', '**/cli/src/**'], message: 'client/ must not import server/ or cli/ (see openspec deployment-modes).' }] },
+      ],
+    },
+  },
+  {
+    files: ['core/**/*.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        { patterns: [{ group: ['**/server/src/**', '**/client/src/**', '**/cli/src/**'], message: 'core/ depends on nothing.' }] },
+      ],
+    },
+  },
   eslintConfigPrettier,
 ];

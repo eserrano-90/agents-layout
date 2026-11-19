@@ -195,6 +195,9 @@ export interface Character {
   matrixEffectSeeds: number[];
   /** Workspace folder name (only set for multi-root workspaces) */
   folderName?: string;
+  /** Label of the emitting client (machine) this agent runs on. Only set when
+   *  more than one client feeds the office. */
+  clientLabel?: string;
 
    chat?: CharacterChatState;
 

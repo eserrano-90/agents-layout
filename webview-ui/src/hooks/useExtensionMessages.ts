@@ -78,6 +78,8 @@ interface ExtensionMessageState {
   hooksEnabled: boolean;
   setHooksEnabled: (v: boolean) => void;
   hooksInfoShown: boolean;
+  /** True when the server has a co-located client whose settings the UI can change. */
+  localClient: boolean;
   dailyUsage: DailyUsage | null;
 }
 
@@ -116,6 +118,7 @@ export function useExtensionMessages(
   const [alwaysShowLabels, setAlwaysShowLabels] = useState(false);
   const [hooksEnabled, setHooksEnabled] = useState(true);
   const [hooksInfoShown, setHooksInfoShown] = useState(true);
+  const [localClient, setLocalClient] = useState(true);
   const [dailyUsage, setDailyUsage] = useState<DailyUsage | null>(null);
 
   // Track whether initial layout has been loaded (ref to avoid re-render)
@@ -129,6 +132,7 @@ export function useExtensionMessages(
       hueShift?: number;
       seatId?: string;
       folderName?: string;
+      clientLabel?: string;
     }> = [];
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -161,6 +165,8 @@ export function useExtensionMessages(
         // Add buffered agents now that layout (and seats) are correct
         for (const p of pendingAgents) {
           os.addAgent(p.id, p.palette, p.hueShift, p.seatId, true, p.folderName);
+          const ch = os.characters.get(p.id);
+          if (ch) ch.clientLabel = p.clientLabel;
         }
         pendingAgents = [];
         layoutReadyRef.current = true;
@@ -200,7 +206,15 @@ export function useExtensionMessages(
         } else {
           os.addAgent(id, undefined, undefined, undefined, undefined, folderName);
         }
+        const created = os.characters.get(id);
+        if (created) created.clientLabel = msg.clientLabel as string | undefined;
         saveAgentSeats(os);
+      } else if (msg.type === 'agentClientLabels') {
+        // Client labels changed (a client connected or left). An empty map clears them.
+        const labels = (msg.labels || {}) as Record<string, string>;
+        for (const [id, ch] of os.characters) {
+          ch.clientLabel = labels[String(id)];
+        }
       } else if (msg.type === 'agentClosed') {
         const id = msg.id as number;
         setAgents((prev) => prev.filter((a) => a !== id));
@@ -234,6 +248,7 @@ export function useExtensionMessages(
           { palette?: number; hueShift?: number; seatId?: string }
         >;
         const folderNames = (msg.folderNames || {}) as Record<number, string>;
+        const clientLabels = (msg.clientLabels || {}) as Record<number, string>;
         if (layoutReadyRef.current) {
           // Layout already loaded — add agents directly (standalone mode:
           // existingAgents can arrive after layoutLoaded)
@@ -241,6 +256,8 @@ export function useExtensionMessages(
             if (os.characters.has(id)) continue;
             const m = meta[id];
             os.addAgent(id, m?.palette, m?.hueShift, m?.seatId, true, folderNames[id]);
+            const ch = os.characters.get(id);
+            if (ch) ch.clientLabel = clientLabels[id];
           }
           saveAgentSeats(os);
         } else {
@@ -253,6 +270,7 @@ export function useExtensionMessages(
               hueShift: m?.hueShift,
               seatId: m?.seatId,
               folderName: folderNames[id],
+              clientLabel: clientLabels[id],
             });
           }
         }
@@ -494,6 +512,8 @@ export function useExtensionMessages(
         if (typeof msg.hooksInfoShown === 'boolean') {
           setHooksInfoShown(msg.hooksInfoShown as boolean);
         }
+        // Absent (older servers) means a co-located client, as before.
+        setLocalClient(msg.localClient !== false);
         if (Array.isArray(msg.externalAssetDirectories)) {
           setExternalAssetDirectories(msg.externalAssetDirectories as string[]);
         }
@@ -569,6 +589,7 @@ export function useExtensionMessages(
     hooksEnabled,
     setHooksEnabled,
     hooksInfoShown,
+    localClient,
     dailyUsage,
   };
 }

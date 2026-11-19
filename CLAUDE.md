@@ -4,51 +4,65 @@ Pixel art office where AI agents (Claude Code terminals today, any tool tomorrow
 
 ## Architecture
 
-Strict layering: `core/` depends on nothing; `server/` depends only on `core/`; `webview-ui/` depends only on `core/`.
+Two halves joined by an HTTP contract. A **client** (emitter) runs next to the agent tool, observes its sessions and sends normalized events. A **server** (receiver + viewer) applies them and serves the office. `npx pixel-agents` runs both in one process; `pixel-agents server` and `pixel-agents client` run them apart.
+
+Strict layering: `core/` depends on nothing; `client/` and `server/` depend only on `core/` and **never on each other** (ESLint `no-restricted-imports` enforces it); `cli/` is the only module that composes both; `webview-ui/` depends only on `core/`.
 
 ```
-core/                                Protocol + interface definitions (zero runtime side effects)
-  asyncapi.yaml                      AsyncAPI 3.0 contract — single source of truth
+core/                                Contract + shared types (zero runtime side effects)
+  asyncapi.yaml                      AsyncAPI 3.0 contract — browser channel (/ws) AND ingest channel (/api/ingest)
   src/
-    messages.ts                      AUTO-GENERATED discriminated unions (do not edit)
-    schemas.ts                       AgentMeta, SpriteData, FurnitureCatalogEntry
-    provider.ts                      HookProvider, AgentEvent (the integration boundary)
-    teamProvider.ts                  Optional TeamProvider (semantic queries for Lead + Teammates)
+    messages.ts                      AUTO-GENERATED browser protocol unions (do not edit)
+    ingestMessages.ts                AUTO-GENERATED ingest contract types (do not edit)
+    ingestSchema.ts                  AUTO-GENERATED JSON Schema for IngestRequest (server validates with it)
+    ingest.ts                        AgentEvent / AgentEventOf helpers over the generated union
+    schemas.ts                       AgentMeta, SpriteData, FurnitureCatalogEntry, PersistedAgent
     transport.ts                     MessageTransport interface, TransportState
-    adapter.ts                       StateAdapter, AssetCache, PersistedAgent, AgentSeat
+    adapter.ts                       StateAdapter
     normalizeProjectPath.ts
-    constants.ts
+    constants.ts                     Wire constants (ingest path, protocol version, batching, heartbeat, timeouts)
 
-server/                              Lifecycle runtime + Fastify HTTP/WS server
+client/                              Emitter: the only code that touches the agent tool's files
   src/
-    providers/hook/claude/           Reference HookProvider — only place that knows Claude specifics
-      claude.ts                      normalizeHookEvent for 11 Claude events, formatToolStatus, file fallback
-      claudeTeamProvider.ts          TeamProvider: reads ~/.claude/teams/<name>/config.json
+    provider.ts                      HookProvider (client-side): hook + transcript normalization, session dirs
+    teamProvider.ts                  TeamProvider: discoverTeammates, getTeamMembers
+    providers/claude/                Claude Code provider — the only place that knows Claude specifics
+      claude.ts                      normalizeHookEvent, formatToolStatus, describeToolStart (status/activity/flags)
+      transcript.ts                  JSONL record → AgentEvents (no prompt text / tool input leaves the machine)
+      claudeTeamProvider.ts          Reads ~/.claude/projects/<p>/<lead>/subagents + ~/.claude/teams/<name>/config.json
       claudeHookInstaller.ts         Atomic install/uninstall in ~/.claude/settings.json
-      constants.ts                   Claude hook event names, script path
       hooks/claude-hook.ts           Hook script (CJS+shebang, bundled to dist/hooks/claude-hook.js)
-    providers/index.ts               Provider registry
-    agentRuntime.ts                  Lifecycle core: timers, scanners, HookEventHandler, SessionRouter, DismissalTracker
+    sessionEmitter.ts                Session discovery, adoption, transcript polling, /clear + /resume, teams, stale check
+    delivery.ts                      EventDelivery: batching, seq, retry/backoff, bounded queue, heartbeat, snapshot, goodbye
+    hookEndpoint.ts                  Loopback POST /api/hooks/:providerId + GET /api/health, writes ~/.pixel-agents/server.json
+    client.ts                        startClient(): composition of the above
+    clientConfig.ts                  client.json (clientId, label, server, token, settings), client-state.json, target resolution
+    dismissalTracker.ts              Dismissal cooldowns, seeded mtimes, pending /clear files
+    constants.ts                     Polling / scanning / grace timings
+  __tests__/                         Vitest (provider, parser, emitter, delivery, endpoint, config, installer, hook script)
+
+server/                              Receiver + viewer: no agent-tool knowledge, no ~/.claude access
+  src/
+    server.ts                        startServer(): store, reducer, ingest, Fastify, WebSocket
+    agentEventReducer.ts             THE place agent state changes: AgentEvent → AgentState + browser messages, heuristic timers
+    ingestService.ts                 Token auth, schema validation, versioning, seq ordering/resync, snapshots, client liveness
+    clientTokens.ts                  Issued tokens (SHA-256 hashes, 0600) + ephemeral all-in-one token
     agentStateStore.ts               EventEmitter-backed single source of truth (typed mutations + events)
-    sessionRouter.ts                 session_id → agent_id mapping, event buffering, pending external sessions
-    dismissalTracker.ts              Unified dismissal state (replaces four legacy globals)
-    hookEventHandler.ts              Dispatches normalized AgentEvent into runtime
-    httpServer.ts                    Fastify: POST /api/hooks/:providerId, GET /api/health, GET /ws, SPA (standalone)
-    clientMessageHandler.ts          Single dispatch point for ClientMessage from webview
-    server.ts                        Top-level composition
-    cli.ts                           npx pixel-agents entry (npm bin)
+    clientMessageHandler.ts          Single dispatch point for browser ClientMessage
+    infrastructure/http/             Fastify adapter + plugins (health, ingest, static)
+    infrastructure/websocket/        /ws adapter
     fileStateAdapter.ts              Namespaced ~/.pixel-agents/ persistence
     configPersistence.ts             { vscode, standalone, externalAssetDirectories }
     layoutPersistence.ts             ~/.pixel-agents/layout.json with atomic tmp+rename
-    fileWatcher.ts                   Hybrid fs.watch + 500ms polling, JSONL line buffering, /clear detection
-    transcriptParser.ts              JSONL parsing for heuristic / file-fallback mode
-    timerManager.ts                  Waiting / permission timers
     assetLoader.ts                   PNG → SpriteData via pngjs
-    teamUtils.ts                     isInlineTeammateOf, getInlineTeammates, hasInlineTeammates
-    types.ts                         ServerAgentState
-    constants.ts                     All timing/scanning constants
-  __tests__/                         13 Vitest files
-  manual-hook-events.http            Manual hook testing helper (REST-Client format)
+    dailyUsageTracker.ts, pricing.ts Daily token/cost totals
+    types.ts                         AgentState (keyed by clientId + sessionId)
+    constants.ts                     Heuristic timer + liveness constants
+  __tests__/                         Vitest (reducer, ingest/presence, HTTP ingest, store, persistence, ...)
+  manual-hook-events.http            Manual requests for the client hook endpoint and the server ingest endpoint
+
+cli/
+  src/cli.ts                         npx pixel-agents entry (npm bin): all-in-one / server / server token / client
 
 webview-ui/                          React 19 + Canvas UI (depends only on core/)
   src/
@@ -144,37 +158,37 @@ Single artifact from the source tree:
 
 ## Communication Flow
 
-Hub-and-spoke. The server is the single aggregation point for all agent activity, regardless of source.
+Hub-and-spoke. The server is the single aggregation point; clients are the only sources.
 
 ```
-Hook scripts ─POST /api/hooks/:providerId─┐
-                                          ├─→ HookProvider.normalizeHookEvent()
-JSONL transcripts ─FileWatcher─→ TranscriptParser ┤
-                                                   ↓
-                                              AgentEvent (canonical)
-                                                   ↓
-                                              AgentRuntime (dispatch on .kind)
-                                                   ↓
-                                           AgentStateStore (mutate)
-                                                   ↓
-                                              StoreEvents → broadcast
-                                                   ↓
-                                           WebSocketTransport
-                                        (standalone browser)
+CLIENT (developer machine)                                   SERVER (office)
+  claude ─hook─> claude-hook.js ─POST loopback─> HookEndpoint
+                                                     │
+  ~/.claude/projects/*.jsonl ─poll─> SessionEmitter <┘
+  ~/.claude/teams/*/config.json ─────┘   │ normalized AgentEvent (+ origin hook|transcript)
+                                         ▼
+                                   EventDelivery ──POST /api/ingest (batched, seq)──> IngestService
+                                                                                         │
+                                                                                 AgentEventReducer
+                                                                                         │
+                                                                                 AgentStateStore ──/ws──> browser
 ```
 
-Adding a new CLI integration is one subdirectory under `server/src/providers/hook/<id>/`: provider, optional `TeamProvider`, installer, hook scripts. Zero changes to the runtime, the UI, or any existing provider.
+In all-in-one mode the same path is used over loopback HTTP (ephemeral token), so every e2e test exercises the contract.
+
+Adding a new CLI integration is one subdirectory under `client/src/providers/<id>/`: provider, optional `TeamProvider`, installer, hook script. Zero changes to the server, the UI, or any existing provider. A non-Node emitter only needs `core/asyncapi.yaml`.
 
 ## AsyncAPI Protocol Contract
 
 `core/asyncapi.yaml` is the contract. Pinned to **3.0.0** because `@asyncapi/modelina@5.10.1` declares `supportedVersions: ['3.0.0']` only; bumping to 3.1.0 produces `export type Root = any`. Revisit when Modelina ships 3.1.0 support.
 
-- **26 ServerMessage variants** (server → client): agent lifecycle, agent activity, sub-agent activity, team + tokens, assets, settings + workspace, diagnostics.
+- **Ingest channel** (`/api/ingest`, HTTP POST): `IngestRequest { protocolVersion, clientId, label?, seq, sentAt, events[], snapshot?, goodbye? }` → `IngestResponse { ok, appliedSeq?, resync?, error?, eventIndex?, supportedVersions? }`. Each event is `{ sessionId, origin: hook|transcript, ts, event: AgentEvent }`. `AgentEvent` (17 kinds, discriminator `kind`) carries display fields resolved by the client: `statusText`, `activity`, `permissionExempt`, `spawnsSubagent`, `spawnsTeammate`. Contract version: `INGEST_PROTOCOL_VERSION`.
+- **27 ServerMessage variants** (server → client): agent lifecycle, agent activity, sub-agent activity, team + tokens, assets, settings + workspace, diagnostics.
 - **18 ClientMessage variants** (client → server): lifecycle (`webviewReady`, `launchAgent`, `focusAgent`, `closeAgent`), layout (`saveAgentSeats`, `saveLayout`, `exportLayout`, `importLayout`), settings (`setSoundEnabled`, `setHooksEnabled`, `setWatchAllSessions`, `setAlwaysShowLabels`, `setHooksInfoShown`, `setLastSeenVersion`), discovery + assets, diagnostics.
 
 Both unions use `oneOf` with `discriminator: type`. Every concrete message sets `additionalProperties: false`.
 
-`core/src/messages.ts` is generated by `scripts/generate-messages.ts` invoking `@asyncapi/modelina` with custom constraints (`propertyKey` preserves `type`/`status` field names; `constant` inlines `const` literals). The file has an auto-generation banner. **CI runs `asyncapi:generate` then `git diff --exit-code core/src/messages.ts` — any non-empty diff fails the build.**
+`core/src/messages.ts`, `core/src/ingestMessages.ts` and `core/src/ingestSchema.ts` are generated by `scripts/generate-messages.ts` (schemas reachable from `IngestRequest`/`IngestResponse` go to the ingest files; a schema shared by both contracts fails generation) invoking `@asyncapi/modelina` with custom constraints (`propertyKey` preserves `type`/`status` field names; `constant` inlines `const` literals). The file has an auto-generation banner. **CI (and `.husky/pre-push`) runs `asyncapi:generate` then `git diff --exit-code` on the three generated files — any non-empty diff fails the build.**
 
 ## Transport Abstraction
 
@@ -196,17 +210,19 @@ export type TransportState = 'connecting' | 'connected' | 'reconnecting' | 'disc
 
 ## Provider Abstraction
 
-`HookProvider` (`core/src/provider.ts`) is the integration boundary. Today only Claude Code is implemented. The interface:
+`HookProvider` (`client/src/provider.ts`) is the integration boundary, and it lives **only in the client**. Today only Claude Code is implemented. The interface:
 
-- **Required**: `normalizeHookEvent(raw)` → `{ sessionId, event: AgentEvent } | null`; `installHooks` / `uninstallHooks` / `areHooksInstalled`; `formatToolStatus`; `permissionExemptTools`, `subagentToolNames`, `readingTools` sets.
-- **Optional file fallback**: `getSessionDirs(workspace)`, `getAllSessionRoots()`, `sessionFilePattern`, `parseTranscriptLine(line)`, `buildLaunchCommand(sessionId, cwd, opts)`. Used when hooks aren't installed.
+- **Required**: `normalizeHookEvent(raw)` → `{ sessionId, event: AgentEvent } | null`; `installHooks` / `uninstallHooks` / `areHooksInstalled`.
+- **Optional transcript support**: `getSessionDirs(workspace)`, `getAllSessionRoots()`, `sessionFileExtension`, `parseTranscriptLine(line)` → `{ events, team? }`, `isClearedSessionHead(head)`, `folderNameFromSessionDir(dir)`.
 - **Optional team extension**: `team?: TeamProvider` for Lead + Teammates support.
 
-`AgentEvent.kind` values: `toolStart`, `toolEnd`, `turnEnd`, `subagentStart`, `subagentEnd`, `subagentTurnEnd`, `progress`, `permissionRequest`, `sessionStart`, `sessionEnd`. The runtime dispatches on `kind`, never on CLI-specific tool names.
+Tool knowledge (status text, reading vs typing, permission exemption, sub-agent / teammate spawns) is resolved by the provider into event fields. The server learns tool names for the browser's animations from events (`providerCapabilities` is rebuilt as names appear).
+
+`AgentEvent.kind` values: `sessionStart`, `sessionEnd`, `sessionReplaced`, `toolStart`, `toolEnd`, `backgroundToolEnd`, `turnEnd`, `subagentStart`, `subagentEnd`, `subagentTurnEnd`, `progress`, `permissionRequest`, `textOutput`, `userPrompt`, `tokenUsage`, `modelInfo`, `teamInfo`. The server dispatches on `kind` and `origin`, never on CLI-specific tool names.
 
 ### TeamProvider (Lead + Teammates)
 
-Optional extension for CLIs that support team workflows (Claude Agent Teams today). Semantic queries (`discoverTeammates`, `getTeamMembers`, `getTeamMetadataForSession`, `extractTeammateNameFromEvent`, `isTeammateSpawnCall`) — providers choose their own storage strategy.
+Optional client-side extension for CLIs that support team workflows (Claude Agent Teams today). Two filesystem queries: `discoverTeammates(projectDir, leadSessionId)` and `getTeamMembers(teamName)`. The `SessionEmitter` resolves lead/teammate links and sends them as `SessionTeam` (`teamName`, `agentName`, `leadSessionId`, `isTeamLead`, `usesTmux`). In-process teammates get wire session id `<leadSessionId>:<teammateName>`.
 
 Three teammate modes:
 
@@ -216,80 +232,65 @@ Three teammate modes:
 | Inline teammate (teams ON)      | `Agent(run_in_background: true)` in-process      | `onTeammateDetected` → `discoverTeammates(projectDir, leadSessionId)` |
 | Session teammate (teams + tmux) | `Agent(run_in_background: true)` in tmux pane    | Own session, own hooks, routes through normal flow                    |
 
-Teammate dismissal is driven by team config polling (`getTeamMembers(teamName)` is authoritative) and by `sessionEnd` on the lead.
+Teammate dismissal is driven by the client's team config polling (`getTeamMembers(teamName)` is authoritative, emitted as `sessionEnd`) and by `sessionEnd` on the lead (the server removes the lead's teammates).
 
 **Subtle gate (the one that bit us recently)**: in `webview-ui/src/hooks/useExtensionMessages.ts`, `agentToolStart` with `runInBackground=true` only creates a Subtask sub-character when the **parent has no `teamName`**. With a team, `onTeammateDetected` creates the teammate instead (and the gate prevents a ghost sub-agent). Without a team, the teammate path never fires and the basic Subtask sub-character is the only visible representation.
 
 ## Server Runtime
 
-`AgentRuntime` (`server/src/agentRuntime.ts`) is the shared lifecycle core. Both surfaces (`server/src/cli.ts` and any future host) compose the same runtime; only the `StateAdapter` namespace and `MessageTransport` differ.
+`startServer()` (`server/src/server.ts`) composes `AgentStateStore`, `AgentEventReducer`, `IngestService`, `ClientTokenStore`, the Fastify adapter and the `/ws` adapter. It reads nothing under `~/.claude`, installs no hooks and writes no `server.json`.
 
-```typescript
-export class AgentRuntime {
-  constructor(opts: {
-    store: AgentStateStore;
-    providerRegistry: ProviderRegistry;
-    layoutPersistence: LayoutPersistence;
-    assetCache: AssetCache;
-    config: Pick<AdapterSettings, 'hooksEnabled' | 'watchAllSessions'>;
-    callbacks: RuntimeLifecycleCallbacks;
-  });
-  registerAgent / unregisterAgent / removeAgent / removeTeammate / removeTeammates
-  restoreExternalAgents / handleHookEvent
-  startProjectScan / startExternalScanning / startStaleCheck
-  dispose();
-}
-```
+### AgentEventReducer
 
-Owns timer Maps (waiting, permission, text-idle, stale), scanners (project-dir 1 s, external 3 s, stale 30 s), `HookEventHandler`, `SessionRouter`, `DismissalTracker`. Scanners are skipped entirely while hooks are flowing (`hookDelivered` is set on every agent). `RuntimeLifecycleCallbacks` is the only seam between runtime and host.
+`server/src/agentEventReducer.ts` is the only code that changes agent state. Agents are keyed by `(clientId, sessionId)`; ids stay numeric for the browser. Hook-origin events set `hookDelivered`, which suppresses the heuristic permission (7 s) and text-idle (5 s) timers; transcript-origin events drive them. Tool-done broadcasts are delayed 300 ms. Ported from the pre-refactor `hookEventHandler` + `transcriptParser` + `timerManager` (`5de96d3`) — when behavior is in doubt, that commit is the reference.
+
+### IngestService and presence
+
+`server/src/ingestService.ts`: bearer token → `ClientTokenStore` (bound to the first `clientId` that uses it; mismatch → 403), version check, Ajv validation with the generated schema (400 with `eventIndex`), per-client `seq` (duplicate → ack, gap or unknown client without snapshot → 409 `resync`). A request's `snapshot` is reconciled before its events. Liveness: clients heartbeat every 10 s (`CLIENT_HEARTBEAT_INTERVAL_MS`); silence beyond 30 s (`CLIENT_TIMEOUT_MS`) or `goodbye` removes the client's agents. Persisted agents stay hidden until a snapshot confirms them (keeping their id, so their seat); unconfirmed ones are dropped after the timeout.
 
 ### AgentStateStore
 
-EventEmitter-backed container in `server/src/agentStateStore.ts`. Typed mutations, typed events (`agentAdded`, `agentRemoved`, `agentUpdated`, `broadcast`). The broadcast layer subscribes once at boot and translates `StoreEvents` into `ServerMessage` over the active transport. **No module under `server/` calls a transport method directly.**
-
-### SessionRouter and DismissalTracker
-
-Two extracted classes that replaced ad-hoc module state. `SessionRouter` owns `session_id → agent_id` mapping, pre-registration event buffering, and pending external sessions. `DismissalTracker` unifies four legacy globals (`dismissedJsonlFiles`, `clearDismissedFiles`, `seededMtimes`, `pendingClearFiles`) into one class with typed reasons.
+EventEmitter-backed container in `server/src/agentStateStore.ts`. Typed mutations, typed events (`agentAdded`, `agentRemoved`, `agentUpdated`, `broadcast`). The `/ws` adapter subscribes per socket. **No module under `server/` calls a transport method directly.**
 
 ### HTTP + WebSocket Server
 
-Fastify v5 with `@fastify/cors`, `@fastify/websocket`, and (in standalone) `@fastify/static`:
+Fastify v5 with `@fastify/cors`, `@fastify/websocket`, `@fastify/static`:
 
-| Method | Path                     | Purpose                                 |
-| ------ | ------------------------ | --------------------------------------- |
-| POST   | `/api/hooks/:providerId` | Bearer-authenticated hook event ingress |
-| GET    | `/api/health`            | Liveness: `{ ok, version, port, pid }`  |
-| GET    | `/ws`                    | Bidirectional protocol channel          |
-| GET    | `/*` (standalone only)   | Webview SPA via `@fastify/static`       |
+| Method | Path            | Purpose                                      |
+| ------ | --------------- | -------------------------------------------- |
+| POST   | `/api/ingest`   | Event batches from clients (per-client token) |
+| GET    | `/api/health`   | Liveness                                     |
+| GET    | `/ws`           | Browser protocol channel (unauthenticated)   |
+| GET    | `/*`            | Office SPA via `@fastify/static`             |
 
-Server discovery written to `~/.pixel-agents/server.json` with `{ port, pid, authToken }`. Multi-window safe: a second server detects an existing `server.json` and reuses or replaces it based on PID liveness.
+Binds to `127.0.0.1` by default; a non-loopback `--host` prints an exposure warning.
+
+The **client** serves, on `127.0.0.1` only, `POST /api/hooks/:providerId` (token from `~/.pixel-agents/server.json`) and `GET /api/health`. The hook script never waits on the network.
 
 ### ClientMessageHandler
 
-Single dispatch point for `ClientMessage`. Each variant calls into `AgentRuntime`, `AgentStateStore`, `LayoutPersistence`, or `FileStateAdapter`, or delegates to host-specific callbacks (`onLaunchAgent`, `onOpenSessionsFolder`, `onExportLayout`, `onImportLayout`, `onSetHooksEnabled`). Both surfaces wire the same handler.
-
-### ServerAgentState (server/src/types.ts)
-
-Per-agent runtime data: provider reference, session key, transcript-fallback fields (`jsonlFile`, `fileOffset`, `lineBuffer`), tool state Maps and Sets, team fields (`teamName`, `agentName`, `isTeamLead`, `leadAgentId`, `teamUsesTmux`), token usage, and the **`hookDelivered`** flag that suppresses heuristic timers when hooks are flowing.
+Single dispatch point for browser `ClientMessage`. `setHooksEnabled` / `setWatchAllSessions` go to an optional `LocalClientControl` (the co-located client in all-in-one mode); `settingsLoaded.localClient` tells the UI whether to show those toggles. `existingAgents.clientLabels`, `agentCreated.clientLabel` and `agentClientLabels` carry client labels only when more than one client is connected.
 
 ## Persistence
 
 ```
 ~/.pixel-agents/
-  config.json              { standalone, externalAssetDirectories }
-  standalone-state.json    { agents, seats }
-  layout.json              OfficeLayout
-  server.json              { port, pid, authToken }
-  hooks/claude-hook.js     Bundled hook script (CJS, shebang)
+  config.json              { vscode, standalone, externalAssetDirectories }     (server: office settings)
+  standalone-state.json    { agents: [{ id, clientId, sessionId, folderName? }], seats }  (server)
+  client-tokens.json       { tokens: [{ id, label, hash, clientId?, createdAt }] }  (server, 0600)
+  layout.json              OfficeLayout                                         (server)
+  usage.json               Daily token totals                                   (server)
+  client.json              { clientId, label?, serverUrl?, token?, hooksEnabled, watchAllSessions }  (client, 0600)
+  client-state.json        { sessions }  live sessions to resume after restart  (client)
+  server.json              { port, pid, token }  the client's loopback hook endpoint
+  hooks/claude-hook.js     Bundled hook script (CJS, shebang)                   (client)
 ```
 
-`FileStateAdapter({ namespace })` backs the runtime. Settings: `soundEnabled`, `lastSeenVersion`, `alwaysShowLabels`, `watchAllSessions`, `hooksEnabled`, `hooksInfoShown`.
-
-Layout writes are atomic via tmp + rename. Cross-window watching is hybrid (`fs.watch` + 2 s polling). `markOwnWrite()` prevents the watcher from re-reading our own write.
+Layout and state writes are atomic via tmp + rename. Agent records written before the client split (no `clientId`) are dropped on load.
 
 ## Agent Status Tracking
 
-JSONL transcripts at `~/.claude/projects/<project-hash>/<session-id>.jsonl`. Project hash = workspace path with `:`/`\`/`/` → `-`.
+JSONL transcripts at `~/.claude/projects/<project-hash>/<session-id>.jsonl`, read **by the client only**. Project hash = workspace path with `:`/`\`/`/` → `-`.
 
 **JSONL record types**: `assistant` (tool_use or thinking), `user` (tool_result or text prompt), `system` with `subtype: "turn_duration"` (reliable turn-end signal), `progress` with `data.type`: `agent_progress` (sub-agent tool_use/tool_result, non-exempt tools trigger permission timers), `bash_progress` (Bash output — restarts permission timer), `mcp_progress` (MCP tool — same timer restart). Also observed but not tracked: `file-history-snapshot`, `queue-operation`.
 
@@ -390,24 +391,15 @@ Three tiers, each with its own framework.
 
 ### Server unit/integration (Vitest)
 
-`server/__tests__/` — 13 files, ~200 tests:
+`server/__tests__/` — reducer (`agentEventReducer.test.ts`: every event kind, timers, teams, reconcile), presence (`ingestService.test.ts`), HTTP ingest (`server.test.ts`: auth, validation, version, seq, goodbye), store, persistence, usage.
 
-| File                           | Coverage                                                            |
-| ------------------------------ | ------------------------------------------------------------------- |
-| `agentStateStore.test.ts`      | Mutations, EventEmitter events, snapshot                            |
-| `hookEventHandler.test.ts`     | Routing, buffering, normalized dispatch, team gating                |
-| `sessionRouter.test.ts`        | session_id mapping, pending sessions, buffer flush                  |
-| `fileStateAdapter.test.ts`     | Namespaced persistence, allowlist, settings round-trip              |
-| `fileWatcherDismissal.test.ts` | DismissalTracker integration                                        |
-| `teamUtils.test.ts`            | Inline-teammate helpers                                             |
-| `claudeTeamProvider.test.ts`   | Discovery, membership, metadata extraction                          |
-| `claude.test.ts`               | `normalizeHookEvent` per Claude event, file fallback                |
-| `claudeHookInstaller.test.ts`  | Atomic install/uninstall                                            |
-| `claude-hook.test.ts`          | Spawned hook script integration (needs `dist/hooks/claude-hook.js`) |
-| `server.test.ts`               | HTTP lifecycle, auth, `/ws`, broadcast                              |
-| `mockClaudeRunner.test.ts`     | E2E scenario runner sanity                                          |
+Run: `npm run test:server`.
 
-Run: `npm run test:server` (or `npm test` for all).
+### Client unit/integration (Vitest)
+
+`client/__tests__/` — provider normalization (`claude.test.ts`), transcript parsing (`transcript.test.ts`), `SessionEmitter` with an in-memory filesystem (`sessionEmitter.test.ts`), delivery queue (`delivery.test.ts`), hook endpoint, config precedence, installer, spawned hook script (needs `dist/hooks/claude-hook.js`), team provider.
+
+Run: `npm run test:client` (`npm test` runs webview + server + client).
 
 ### Webview unit (Vitest, Node runner)
 
@@ -426,7 +418,7 @@ Run: `npm run test:webview`.
 | `cross-cutting`      | spread across both lifecycle files                                        | turn_duration cleanup, permission timer cancellation, sub-agent permission bubble, sound, label persistence, hook install/uninstall, layout editor save round-trip |
 | `teams`              | `claude/hooks-on/teams.spec.ts`                                           | Internal/external lead + tmux/inline teammate routing                                                                                                              |
 | `matrix`             | `claude/hooks-off/matrix.spec.ts`                                         | Heuristic-mode broad coverage                                                                                                                                      |
-| `standalone`         | `standalone/hooks.spec.ts`                                                | npx pixel-agents serves SPA, WebSocket protocol, hook-driven lifecycle in browser                                                                                  |
+| `standalone`         | `standalone/hooks.spec.ts`, `standalone/split.spec.ts`                    | npx pixel-agents serves SPA, WebSocket protocol, hook-driven lifecycle in browser; server + client with separate homes, restart, goodbye, third-party emitter     |
 
 **Mock claude**: Tests never invoke real `claude`. A bash script (`e2e/fixtures/mock-claude`) is copied into an isolated `bin/` and prepended to `PATH`. The scenario runner (`mock-claude-runner.cjs`) honors `claudeScenario(...).at(ms).appendJsonl(record).emitHook(event).holdOpenFor(ms).build()` to drive timed JSONL writes and hook events.
 
@@ -455,7 +447,7 @@ npm run test:report:open                       # serve Allure locally (file:// c
 
 ## Build & Dev
 
-**npm workspaces monorepo** (`server`, `webview-ui`). A single `npm install` at the root installs deps for all workspaces; `cd webview-ui && npm install` is redundant.
+**npm workspaces monorepo** (`server`, `client`, `cli`, `webview-ui`). A single `npm install` at the root installs deps for all workspaces; `cd webview-ui && npm install` is redundant.
 
 ```bash
 npm install                # installs root + workspaces in one shot
@@ -468,8 +460,8 @@ npm run e2e                # Playwright
 
 `esbuild.js` runs two bundles:
 
-1. **CLI** (`dist/cli.js`) from `server/src/cli.ts`. Externals pulled at install time (`fastify`, `@fastify/*`).
-2. **Hook scripts** (`dist/hooks/claude-hook.js`) from `server/src/providers/hook/claude/hooks/claude-hook.ts`. CJS, shebang.
+1. **CLI** (`dist/cli.js`) from `cli/src/cli.ts`. Externals pulled at install time (`fastify`, `@fastify/*`, `ajv`).
+2. **Hook scripts** (`dist/hooks/claude-hook.js`) from `client/src/providers/claude/hooks/claude-hook.ts`. CJS, shebang.
 
 `define: { 'process.env.PIXEL_AGENTS_VERSION': JSON.stringify(version) }` stamps the package version into all bundles.
 
@@ -505,8 +497,9 @@ All magic numbers and strings are centralized — never inline:
 
 | Where                              | What lives there                                                                                                                        |
 | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `server/src/constants.ts`          | All timing/scanning constants (`PERMISSION_TIMER_DELAY_MS`, `TEXT_IDLE_DELAY_MS`, scanner intervals) shared by server and standalone |
-| `core/src/constants.ts`            | Protocol-level constants (e.g., transport state names)                                                                                  |
+| `server/src/constants.ts`          | Heuristic timers (`PERMISSION_TIMER_DELAY_MS`, `TEXT_IDLE_DELAY_MS`, `TOOL_DONE_DELAY_MS`), liveness check interval                 |
+| `client/src/constants.ts`          | Transcript polling, session scanning, dismissal cooldowns, `/clear` grace, hook endpoint, delivery timeouts                         |
+| `core/src/constants.ts`            | Wire constants: ingest path + version, batch size/flush, heartbeat, client timeout, queue limit, retry backoff                         |
 | `webview-ui/src/constants.ts`      | Webview magic numbers (grid, animation, rendering, camera, zoom, editor, game logic) + canvas overlay rgba strings                      |
 | `webview-ui/src/index.css` `:root` | CSS custom properties (`--pixel-bg`, `--pixel-border`, `--pixel-accent`, ...) for React inline styles and CSS                           |
 | `webview-ui/src/office/types.ts`   | Re-exports grid constants from `constants.ts` for convenience                                                                           |
@@ -545,7 +538,7 @@ Use `console.log`/`error`/`warn` with prefixed context:
 
 ## Manual Hook Testing
 
-`server/manual-hook-events.http` (REST-Client format) drives the local hook server. Copy `port` and `token` from `~/.pixel-agents/server.json`. Covers `SessionStart` → `PreToolUse` → `PermissionRequest`/`Notification`/`Stop` → `SessionEnd`.
+`server/manual-hook-events.http` (REST-Client format) drives the client's loopback hook endpoint (copy `port` and `token` from `~/.pixel-agents/server.json`) and, at the end, the server's `/api/ingest` (token from `pixel-agents server token add`). Covers `SessionStart` → `PreToolUse` → `PermissionRequest`/`Notification`/`Stop` → `SessionEnd`.
 
 If `cwd` is outside the current workspace, enable **Watch All Sessions** first.
 
@@ -565,18 +558,19 @@ Supporting: `wall-tile-editor.html` (wall sprite editing), `jsonl-viewer.html` (
 
 ## Key Decisions
 
-- **Four-package monorepo** with strict layering (core → server → adapters; core → webview-ui). Standalone CLI never imports `adapters/vscode/` and vice versa.
+- **Client / server split** (openspec change `decouple-event-client-from-server`): the client normalizes, the server is tool-agnostic and filesystem-blind toward agent tools; one HTTP ingest path in every mode; `cli/` is the only composition point.
+- **Layered monorepo**: core ← client, core ← server, core ← webview-ui; client and server never import each other.
 - **AsyncAPI 3.0 contract**, generated TS bindings, CI drift check. Single source of truth for the wire protocol.
-- **AgentRuntime** shared lifecycle core, composed by both surfaces.
+- **AgentEventReducer** is the single place agent state changes; heuristic timers stay server-side, gated by event `origin`.
 - **AgentStateStore** as single source of truth with typed mutations and typed events. No transport calls outside the broadcast layer.
 - **Transport abstraction**: `MessageTransport` interface, `PostMessageTransport` + `WebSocketTransport`. One branching point in the entire UI.
-- **HookProvider** as the integration boundary, with optional file fallback. New CLIs are a single subdirectory under `server/src/providers/hook/<id>/`.
+- **HookProvider** as the integration boundary, client-side only, with optional transcript fallback. New CLIs are a single subdirectory under `client/src/providers/<id>/`.
 - **TeamProvider** as optional extension. Claude Agent Teams is the only implementation.
 - **Per-adapter namespaced persistence** under `~/.pixel-agents/`. Single namespace for all state.
 - **Single `WebviewViewProvider`** (panel area, not editor area).
 - **Inline esbuild problem matcher** (no extra extension needed).
 - **`erasableSyntaxOnly`** in webview forbids `enum` — use `as const` objects.
-- **Server always starts** regardless of hooks toggle. Only hook installation is gated by the setting.
+- **Server always starts** regardless of hooks toggle. Only hook installation (a client concern) is gated by the setting.
 - **E2E over webview unit tests** for OSS friction. Community PRs change webview internals constantly; unit tests would force contributors to update internals tests on top of feature work. E2E pins user-facing behavior, which is stable across internal refactors.
 
 ## Project Identity

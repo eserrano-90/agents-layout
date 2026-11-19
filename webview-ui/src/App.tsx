@@ -82,6 +82,7 @@ function App() {
     hooksEnabled,
     setHooksEnabled,
     hooksInfoShown,
+    localClient,
     dailyUsage,
   } = useExtensionMessages(getOfficeState, editor.setLastSavedLayout, isEditDirty);
 
@@ -280,7 +281,7 @@ function App() {
       )}
 
       {/* Hooks first-run tooltip */}
-      {!hooksInfoShown && !hooksTooltipDismissed && (
+      {localClient && !hooksInfoShown && !hooksTooltipDismissed && (
         <Tooltip
           title="Instant Detection Active"
           position="top-right"
@@ -374,6 +375,7 @@ function App() {
           transport.send({ type: 'setWatchAllSessions', enabled: newVal });
         }}
         hooksEnabled={hooksEnabled}
+        localClient={localClient}
         onToggleHooksEnabled={() => {
           const newVal = !hooksEnabled;
           setHooksEnabled(newVal);

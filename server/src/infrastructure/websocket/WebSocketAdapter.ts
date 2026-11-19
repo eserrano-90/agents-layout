@@ -1,19 +1,18 @@
 import type { FastifyInstance } from 'fastify';
 
 import type { ClientMessage,ServerMessage } from '../../../../core/src/messages.js';
-import type { AgentRuntime } from '../../agentRuntime.js';
 import type { AgentStateStore } from '../../agentStateStore.js';
 import type { MessageBus } from '../../application/ports/MessageBus.js';
-import type { AssetCache, SetHooksEnabledSideEffect } from '../../clientMessageHandler.js';
+import type { ClientMessageContext } from '../../clientMessageHandler.js';
 import { handleClientMessage } from '../../clientMessageHandler.js';
 import type { AgentState } from '../../types.js';
 
 export interface WebSocketAdapterOptions {
   store: AgentStateStore;
-  runtime?: AgentRuntime;
-  assetCache?: AssetCache;
-  onSetHooksEnabled?: SetHooksEnabledSideEffect;
-  embedded?: boolean;
+  /** Everything a browser message may need, minus the store. */
+  context: Omit<ClientMessageContext, 'store'>;
+  /** Label to show for an agent's client, or undefined when labels are hidden. */
+  clientLabelFor?: (agent: AgentState) => string | undefined;
 }
 
 interface WsSocket {
@@ -32,16 +31,7 @@ export class WebSocketAdapter implements MessageBus {
   constructor(private readonly opts: WebSocketAdapterOptions) {}
 
   registerRoutes(app: FastifyInstance): void {
-    app.get('/ws', { websocket: true }, (socket, request) => {
-      if (this.opts.embedded) {
-        const auth = request.headers.authorization ?? '';
-        const expected = `Bearer ${this.opts.runtime}`;
-        if (auth !== expected) {
-          socket.close(4001, 'unauthorized');
-          return;
-        }
-      }
-
+    app.get('/ws', { websocket: true }, (socket) => {
       const { store } = this.opts;
       this.sockets.add(socket);
 
@@ -56,6 +46,7 @@ export class WebSocketAdapter implements MessageBus {
           parentAgentId: agent.leadAgentId,
           teamName: agent.teamName,
           hooksOnly: agent.hooksOnly || undefined,
+          clientLabel: this.opts.clientLabelFor?.(agent),
         });
       };
 
@@ -74,14 +65,10 @@ export class WebSocketAdapter implements MessageBus {
       socket.on('message', (data: Buffer | string) => {
         try {
           const msg = JSON.parse(data.toString()) as Record<string, unknown>;
-          if (!this.opts.embedded && msg.type) {
-            console.log('[Pixel Agents] WS client message:', msg.type);
-          }
+          if (msg.type) console.log('[Pixel Agents] WS client message:', msg.type);
           handleClientMessage(msg, (m) => this.safeSend(socket, m), {
+            ...this.opts.context,
             store,
-            runtime: this.opts.runtime,
-            cache: this.opts.assetCache ?? null,
-            onSetHooksEnabled: this.opts.onSetHooksEnabled,
           });
         } catch {
           // Malformed JSON, ignore

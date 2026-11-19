@@ -1,9 +1,14 @@
-# Pixel Agents manual hook server requests
+# Pixel Agents manual hook requests
+#
+# Two endpoints are exercised here:
+#   - the CLIENT's loopback hook endpoint (what Claude Code's hook script calls), and
+#   - the SERVER's ingest endpoint (what clients call), at the end of this file.
 #
 # Usage:
-# 1. Start the VS Code extension or run `npx pixel-agents` so the local hook server is running.
+# 1. Run `npx pixel-agents` (all-in-one) so a local client is running.
 # 2. Copy `port` and `token` from `~/.pixel-agents/server.json` into the variables below.
-# 3. Set `cwd` to a workspace folder opened in the Extension Development Host,
+#    That file describes the client's hook endpoint, not the office port.
+# 3. Set `cwd` to the directory pixel-agents was started in,
 #    or enable "Watch All Sessions" in Pixel Agents.
 # 4. Run the requests in order with a REST client that supports `.http` files.
 #
@@ -16,7 +21,7 @@
 # - On Windows, use forward slashes in `cwd` or escape backslashes in the JSON string.
 
 @host = 127.0.0.1
-@port = 3100
+@port = paste-port-from-~/.pixel-agents/server.json
 @token = paste-token-from-~/.pixel-agents/server.json
 @provider = claude
 @sessionId = manual-session-1
@@ -137,4 +142,34 @@ Content-Type: application/json
   "hook_event_name": "SessionStart",
   "source": "clear",
   "cwd": "{{cwd}}"
+}
+
+
+###
+# ── Server ingest endpoint (what clients send) ───────────────────────
+# Needs a server token: `npx pixel-agents server token add manual` (server-only mode).
+# The first request of a client must carry a snapshot; later ones increase `seq`.
+@officePort = 3100
+@ingestToken = paste-token-from-server-token-add
+@clientId = manual-client
+
+POST http://{{host}}:{{officePort}}/api/ingest
+Authorization: Bearer {{ingestToken}}
+Content-Type: application/json
+
+{
+  "protocolVersion": 1,
+  "clientId": "{{clientId}}",
+  "label": "manual",
+  "seq": 1,
+  "sentAt": 0,
+  "snapshot": { "sessions": [] },
+  "events": [
+    { "sessionId": "manual-1", "origin": "hook", "ts": 0,
+      "event": { "kind": "sessionStart", "folderName": "manual" } },
+    { "sessionId": "manual-1", "origin": "hook", "ts": 1,
+      "event": { "kind": "toolStart", "toolId": "t1", "toolName": "Bash",
+                 "statusText": "Running: npm test", "activity": "typing",
+                 "permissionExempt": false, "spawnsSubagent": false } }
+  ]
 }

@@ -154,18 +154,9 @@ export class AgentStateStore {
     for (const agent of this.agents.values()) {
       persisted.push({
         id: agent.id,
+        clientId: agent.clientId,
         sessionId: agent.sessionId,
-        // Retained for persistence-schema stability; standalone has no terminal.
-        terminalName: '',
-        isExternal: agent.isExternal || undefined,
-        jsonlFile: agent.jsonlFile,
-        projectDir: agent.projectDir,
         folderName: agent.folderName,
-        teamName: agent.teamName,
-        agentName: agent.agentName,
-        isTeamLead: agent.isTeamLead,
-        leadAgentId: agent.leadAgentId,
-        teamUsesTmux: agent.teamUsesTmux,
       });
     }
     this.adapter.saveAgents(persisted);

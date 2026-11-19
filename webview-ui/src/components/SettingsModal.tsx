@@ -19,6 +19,9 @@ interface SettingsModalProps {
   onToggleWatchAllSessions: () => void;
   hooksEnabled: boolean;
   onToggleHooksEnabled: () => void;
+  /** Hooks and session watching are settings of a co-located client; without
+   *  one (server-only mode) there is nothing for them to act on. */
+  localClient: boolean;
 }
 
 export function SettingsModal({
@@ -33,6 +36,7 @@ export function SettingsModal({
   onToggleWatchAllSessions,
   hooksEnabled,
   onToggleHooksEnabled,
+  localClient,
 }: SettingsModalProps) {
   const [soundLocal, setSoundLocal] = useState(isSoundEnabled);
 
@@ -98,16 +102,20 @@ export function SettingsModal({
           transport.send({ type: 'setSoundEnabled', enabled: newVal });
         }}
       />
-      <Checkbox
-        label="Watch All Sessions"
-        checked={watchAllSessions}
-        onChange={onToggleWatchAllSessions}
-      />
-      <Checkbox
-        label="Instant Detection (Hooks)"
-        checked={hooksEnabled}
-        onChange={onToggleHooksEnabled}
-      />
+      {localClient && (
+        <>
+          <Checkbox
+            label="Watch All Sessions"
+            checked={watchAllSessions}
+            onChange={onToggleWatchAllSessions}
+          />
+          <Checkbox
+            label="Instant Detection (Hooks)"
+            checked={hooksEnabled}
+            onChange={onToggleHooksEnabled}
+          />
+        </>
+      )}
       <Checkbox
         label="Always Show Labels"
         checked={alwaysShowOverlay}
