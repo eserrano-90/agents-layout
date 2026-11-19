@@ -199,10 +199,10 @@ This section is auto-generated. Do not edit between the markers; CI fails on dri
 ### `@area:standalone` (5 tests)
 
 - `e2e/standalone/hooks.spec.ts:10` — propagates hook-driven lifecycle into the browser UI (Standalone / hooks)
-- `e2e/standalone/split.spec.ts:37` — a remote client session shows status, tokens and survives /clear (Standalone / split deployment)
-- `e2e/standalone/split.spec.ts:74` — stopping the client removes its agents; a server restart brings them back (Standalone / split deployment)
-- `e2e/standalone/split.spec.ts:98` — server-only mode hides client-only settings (Standalone / split deployment)
-- `e2e/standalone/split.spec.ts:105` — a third-party emitter can post contract batches directly (Standalone / split deployment)
+- `e2e/standalone/split.spec.ts:41` — a remote client session shows status, tokens and survives /clear (Standalone / split deployment)
+- `e2e/standalone/split.spec.ts:86` — stopping the client removes its agents; a server restart brings them back (Standalone / split deployment)
+- `e2e/standalone/split.spec.ts:114` — server-only mode hides client-only settings (Standalone / split deployment)
+- `e2e/standalone/split.spec.ts:121` — a third-party emitter can post contract batches directly (Standalone / split deployment)
 
 ### `@area:pets` (3 tests)
 
