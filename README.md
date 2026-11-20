@@ -9,6 +9,24 @@ npx pixel-agents [--port 3100]
 Opens a browser-based office view. Agents appear as pixel-art characters, showing their
 current activity (typing, reading, browsing, waiting).
 
+## Installation
+
+**Requirements:** Node.js 18 or later. Nothing else to install — `npx` downloads and runs
+the package on demand.
+
+```bash
+cd your-project        # the directory Claude Code runs in
+npx pixel-agents
+```
+
+No install step, no global state beyond `~/.pixel-agents/` (see [Persistence](#persistence)).
+To skip the download on every run, install it once globally instead:
+
+```bash
+npm install -g pixel-agents
+pixel-agents            # same CLI, same flags, from anywhere
+```
+
 ## Quick Start
 
 ```bash
@@ -25,6 +43,23 @@ Claude Code sessions in the current directory.
 2. The hook script is installed automatically into `~/.claude/settings.json`
 3. When Claude Code runs in any project watched by the office, agents appear instantly
 
+If a character doesn't appear, check **Troubleshooting** below.
+
+### Troubleshooting
+
+- **Port 3100 already in use** — pick another port: `npx pixel-agents --port 3200`.
+- **No character appears after enabling hooks** — restart any already-running Claude
+  Code session; hooks only apply to sessions started after install. Check
+  `~/.claude/settings.json` has a `pixel-agents` hook entry.
+- **Office loads but stays empty with hooks off** — heuristic mode polls JSONL
+  transcripts every few seconds; give it a moment, and confirm the project directory
+  matches where Claude Code is actually running.
+- **Client can't reach a remote server** — verify the server's `--host`/`--port`, that
+  firewalls allow the connection, and that the token wasn't revoked
+  (`npx pixel-agents server token list`).
+- **Stale state** — delete `~/.pixel-agents/` to reset all settings, layout, and
+  tokens, then run `npx pixel-agents` again.
+
 ## Running the office on another machine
 
 Pixel Agents has two halves that can run on different machines:
@@ -32,19 +67,63 @@ Pixel Agents has two halves that can run on different machines:
 - the **server** shows the office and receives events;
 - a **client** runs next to Claude Code, watches its sessions and sends them to a server.
 
-```bash
-# On the machine that shows the office
-npx pixel-agents server --host 0.0.0.0 --port 3100
-npx pixel-agents server token add ana-laptop      # prints a token once
+### Connecting a client — step by step
 
-# On each developer machine
+**1. On the machine that will show the office, start the server:**
+
+```bash
+npx pixel-agents server --host 0.0.0.0 --port 3100
+```
+
+`--host 0.0.0.0` is required for other machines to reach it; the default `127.0.0.1`
+only accepts connections from the same machine. See
+[Network exposure](#network-exposure) before exposing it beyond a trusted network.
+
+**2. Still on the server machine, issue one token per client:**
+
+```bash
+npx pixel-agents server token add ana-laptop      # pick a label that identifies the client
+```
+
+This prints the token secret **once** — copy it now. It is not shown again (only the
+hashed copy is kept in `client-tokens.json`); if you lose it, revoke it and add a new one.
+
+**3. On each developer machine, start the client with that token:**
+
+```bash
+cd your-project        # the directory Claude Code runs in
 npx pixel-agents client --server http://office-host:3100 --token <token>
 ```
 
-The client also reads `PIXEL_AGENTS_URL`, `PIXEL_AGENTS_TOKEN` and `PIXEL_AGENTS_LABEL`.
+Use the server machine's actual address for `--server` (hostname, IP, or Tailscale/VPN
+address) — `office-host` above is a placeholder.
+
+**4. Verify it connected:**
+
+- the client logs a successful connection to the server on startup;
+- the office page (`http://office-host:3100`) shows a character for that session once
+  Claude Code runs there;
+- `npx pixel-agents server token list` (run on the server) shows the token as issued.
+
+If it doesn't connect, see [Troubleshooting](#troubleshooting) — "Client can't reach a
+remote server".
+
+### Client configuration
+
+The client also reads `PIXEL_AGENTS_URL`, `PIXEL_AGENTS_TOKEN` and `PIXEL_AGENTS_LABEL`
+as an alternative to flags — handy for a long-running client in a shell profile or
+service unit:
+
+```bash
+export PIXEL_AGENTS_URL=http://office-host:3100
+export PIXEL_AGENTS_TOKEN=<token>
+export PIXEL_AGENTS_LABEL=ana-laptop
+npx pixel-agents client
+```
+
 Command-line options win over environment variables, which win over
-`~/.pixel-agents/client.json`. When several clients feed one office, each character
-shows which machine it runs on.
+`~/.pixel-agents/client.json` (the client's saved config from a previous run).
+When several clients feed one office, each character shows which machine it runs on.
 
 Manage tokens on the server with `npx pixel-agents server token list` and
 `npx pixel-agents server token revoke <id|label>`. A revoked client is refused on its
